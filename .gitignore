@@ -1,0 +1,15 @@
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+
+# Secrets
+.env
+
+# Runtime artifacts
+database/*.db*
+exports/*.xlsx
+
+# OS
+.DS_Store
+Thumbs.db

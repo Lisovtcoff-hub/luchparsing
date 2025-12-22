@@ -1,0 +1,12 @@
+services:
+  app:
+    build: .
+    container_name: luchparsing
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./database:/app/database
+      - ./exports:/app/exports
+    restart: unless-stopped
