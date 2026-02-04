@@ -1,12 +1,22 @@
 services:
-  app:
+  luchparsing:
     build: .
     container_name: luchparsing
-    ports:
-      - "8000:8000"
     env_file:
       - .env
+    environment:
+      - CHROMEDRIVER=/usr/bin/chromedriver
+      - CHROME_BIN=/usr/bin/chromium
+      - DISPLAY=:99
+      - LOG_LEVEL=DEBUG
+    shm_size: "4gb"
+    ports:
+      - "8000:8000"
     volumes:
-      - ./database:/app/database
-      - ./exports:/app/exports
+      - dbdata:/app/database
+      - exportsdata:/app/exports
     restart: unless-stopped
+
+volumes:
+  dbdata:
+  exportsdata:

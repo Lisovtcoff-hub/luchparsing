@@ -1,10 +1,14 @@
-.venv/
+# Python cache / local venv
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
-.env
-database/*.db*
-exports/*.xlsx
-.git/
-.github/
+.venv/
+
+# я бегая между вс код и пайчарм
+.vscode/
+.idea/
+
+# OS(на всякий)
+.DS_Store
+Thumbs.db

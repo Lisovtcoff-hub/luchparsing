@@ -154,16 +154,34 @@ class SyncSeleniumAdapter(CarrierAdapter):
     SEMAPHORE: Optional[asyncio.Semaphore] = None
 
     async def calc(self, client, p: CalcParams) -> CalcResult:
-        """Запускает синхронный Selenium в пуле потоков с контролем таймаута и параллелизма."""
+        """Запускает синхронный Selenium в пуле потоков с контролем параллелизма.
+
+        Важный нюанс: asyncio.wait_for НЕ умеет «убивать» поток.
+        Поэтому таймауты реализованы так, чтобы:
+        - при истечении TIMEOUT мы отдавали TemporaryError;
+        - но semaphore НЕ отпускался, пока поток реально не завершится
+          (иначе получаем «фантомные» браузеры и лавину параллельности).
+        """
         sem = self.SEMAPHORE or SELENIUM_SEMAPHORE
-        async with sem:
+
+        await sem.acquire()
+        task = asyncio.create_task(asyncio.to_thread(self._run_sync_with_mapped_errors, p))
+
+        def _release(_t: asyncio.Task) -> None:
             try:
-                return await asyncio.wait_for(
-                    asyncio.to_thread(self._run_sync_with_mapped_errors, p),
-                    timeout=self.TIMEOUT,
-                )
-            except asyncio.TimeoutError as e:
-                raise TemporaryError(f"{self.code}: timeout {self.TIMEOUT:.0f}s") from e
+                sem.release()
+            except ValueError:
+                # на всякий случай: если release() вызван лишний раз
+                pass
+
+        task.add_done_callback(_release)
+
+        try:
+            # shield: чтобы timeout/cancel не отменял task (и не отпускал семафор преждевременно)
+            return await asyncio.wait_for(asyncio.shield(task), timeout=self.TIMEOUT)
+        except asyncio.TimeoutError as e:
+            raise TemporaryError(f"{self.code}: timeout {self.TIMEOUT:.0f}s") from e
+
 
     def _calc_sync(self, p: CalcParams) -> CalcResult:
         """Синхронная реализация расчёта (реализуется в наследнике)."""
@@ -192,7 +210,14 @@ class SyncSeleniumAdapter(CarrierAdapter):
     def new_browser(self):
         """Открывает браузер с учётом HEADLESS, гарантируя закрытие."""
         with browser(headless=self.HEADLESS) as drv:
+            # Вешаем базовые таймауты на сам драйвер (это снижает шанс вечных зависаний).
+            try:
+                drv.set_page_load_timeout(float(self.TIMEOUT))
+                drv.set_script_timeout(float(self.TIMEOUT))
+            except Exception:
+                pass
             yield drv
+
 
     @staticmethod
     def by_css(css: str) -> Tuple[str, str]:

@@ -105,22 +105,27 @@ def vozovoz(
 
 
         allowances: Dict[str, Any] = {}
+        ins = 0.0
+        wh = 0.0
         try:
-            ins = (service[1] or {}).get("basePrice")
-            if ins is not None:
+            ins_raw = (service[1] or {}).get("basePrice") if len(service) > 1 else None
+            if ins_raw is not None:
+                ins = float(ins_raw)
                 allowances["Страхование"] = ins
         except Exception:
             pass
         try:
-            wh = (service[2] or {}).get("basePrice")
-            if wh is not None:
+            wh_raw = (service[2] or {}).get("basePrice") if len(service) > 2 else None
+            if wh_raw is not None:
+                wh = float(wh_raw)
                 allowances["Складская обработка"] = wh
         except Exception:
             pass
 
         name_tarif_json: Optional[str] = None
 
-        return price, days, (allowances or None), name_tarif_json
+        total = (float(price) + ins + wh) if price is not None else None
+        return total, days, (allowances or None), name_tarif_json
 
     except Exception:
         return None, None, None, None

@@ -10,6 +10,7 @@ import asyncio
 import json
 import random
 import re
+import os
 import time
 from typing import Optional
 
@@ -17,7 +18,6 @@ import httpx
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
-from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.common.action_chains import ActionChains
@@ -565,7 +565,25 @@ def sdek_calc_sync(
     """
     options = Options()
 
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+    options.add_argument("--window-size=1366,768")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-extensions")
+    options.add_argument("--disable-infobars")
+    options.add_argument("--lang=ru-RU")
+
+    if os.getenv("CDEK_HEADLESS", "0") == "1":
+        options.add_argument("--headless=new")
+
+    chrome_bin = os.getenv("CHROME_BIN")
+    if chrome_bin:
+        options.binary_location = chrome_bin
+
+    driver = webdriver.Chrome(
+        service=Service(executable_path=os.getenv("CHROMEDRIVER", "/usr/bin/chromedriver")),
+        options=options,
+    )
     driver.set_page_load_timeout(60)
 
     try:

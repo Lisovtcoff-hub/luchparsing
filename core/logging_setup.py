@@ -11,6 +11,11 @@ import os
 from logging.handlers import RotatingFileHandler
 
 
+class ManualOnlyFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return bool(getattr(record, "manual", False))
+
+
 def setup_logging() -> None:
     """Функция setup_logging.
     """
@@ -20,16 +25,21 @@ def setup_logging() -> None:
     fmt = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
     datefmt = "%Y-%m-%d %H:%M:%S"
 
+    manual_only = (os.getenv("LOG_MANUAL_ONLY") or "1").strip().lower() not in ("0", "false", "no", "off")
     root = logging.getLogger()
     root.setLevel(level)
 
-
     if root.handlers:
+        if manual_only:
+            for h in root.handlers:
+                h.addFilter(ManualOnlyFilter())
         return
 
     console = logging.StreamHandler()
     console.setLevel(level)
     console.setFormatter(logging.Formatter(fmt=fmt, datefmt=datefmt))
+    if manual_only:
+        console.addFilter(ManualOnlyFilter())
     root.addHandler(console)
 
     log_file = os.getenv("LOG_FILE")
@@ -37,7 +47,13 @@ def setup_logging() -> None:
         file_handler = RotatingFileHandler(log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8")
         file_handler.setLevel(level)
         file_handler.setFormatter(logging.Formatter(fmt=fmt, datefmt=datefmt))
+        if manual_only:
+            file_handler.addFilter(ManualOnlyFilter())
         root.addHandler(file_handler)
+
+
+def manual_log(logger: logging.Logger, level: int, msg: str, **extra) -> None:
+    logger.log(level, msg, extra={"manual": True, **extra})
 
 
 def kv(**fields) -> str:

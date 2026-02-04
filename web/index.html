@@ -75,7 +75,9 @@
         <div class="panel-head">
           <h2 id="right-title" class="panel-title">Статус и результаты</h2>
           <div class="panel-tools">
+            <button id="logsBtn" type="button" class="btn btn-ghost">логи последнего запуска</button>
             <button id="exportXlsxBtn" type="button" class="btn">экспорт .xlsx</button>
+            <button id="exportDbBtn" type="button" class="btn">??????? ??</button>
           </div>
         </div>
         <div class="panel-body">
@@ -195,26 +197,26 @@
         <div class="modal-grid">
           <div class="field">
             <label class="label" for="p-places">количество мест</label>
-            <input id="p-places" class="input" type="number" min="1" value="1" />
+            <input id="p-places" class="input" type="number" min="1" placeholder="1" />
           </div>
           <div class="field">
             <label class="label" for="p-weight">вес, кг</label>
             <input id="p-weight" class="input" type="number" min="0" step="0.1" placeholder="12" />
           </div>
           <div class="field">
-            <label class="label" for="p-volume">объём, м³</label>
+            <label class="label" for="p-volume">объём, м³ (на 1 место)</label>
             <input id="p-volume" class="input" type="number" min="0" step="0.001" placeholder="0.026" />
           </div>
 
           <div class="field" style="grid-column: 1 / -1;">
-            <label class="label">габариты, см (Ш × В × Д) <p style="color: red;">ОБЪЯЗАТЕЛЬНО</p></label>
+            <label class="label">габариты, см (Ш × В × Д)</label>
             <div class="dim-row">
               <input id="p-w" class="input input-sm" type="number" min="0" step="1" placeholder="ширина" aria-label="ширина, см" />
               <input id="p-h" class="input input-sm" type="number" min="0" step="1" placeholder="высота" aria-label="высота, см" />
               <input id="p-l" class="input input-sm" type="number" min="0" step="1" placeholder="длина" aria-label="длина, см" />
               <span class="chip">см</span>
             </div>
-            <div class="hint">объём (м³) пересчитывается автоматически из габаритов и количества мест</div>
+            <div class="hint">объём (м³ на 1 место) пересчитывается автоматически из габаритов</div>
           </div>
         </div>
 
@@ -243,6 +245,55 @@
     </div>
   </div>
 
+
+  <!-- Модалка: Логи последнего запуска -->
+  <div class="modal" id="logsModal" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="logsTitle">
+    <div class="modal-backdrop" data-close="logsModal"></div>
+    <div class="modal-card modal-wide">
+      <div class="modal-head">
+        <h3 class="modal-title" id="logsTitle">Логи последнего запуска</h3>
+        <button class="close-btn" type="button" data-close="logsModal" aria-label="Закрыть">×</button>
+      </div>
+      <div class="modal-body">
+        <div class="filters logs-filters">
+          <div class="field">
+            <label class="label" for="logsSiteFilter">сайт</label>
+            <select id="logsSiteFilter" class="select">
+              <option value="">все</option>
+            </select>
+          </div>
+          <div class="field">
+            <label class="label" for="logsSort">сортировка</label>
+            <select id="logsSort" class="select">
+              <option value="time">по времени</option>
+              <option value="site">по сайту</option>
+            </select>
+          </div>
+          <div class="muted" id="logsJobHint"></div>
+        </div>
+        <div class="table-wrap">
+          <table class="table table-logs" aria-label="Логи">
+            <thead>
+              <tr>
+                <th>сайт</th>
+                <th>маршрут</th>
+                <th>пресет</th>
+                <th>цена</th>
+                <th>срок</th>
+                <th>статус</th>
+                <th>ошибка</th>
+                <th class="col-time">время</th>
+              </tr>
+            </thead>
+            <tbody id="logsBody">
+              <tr class="muted"><td colspan="8" style="text-align:center; padding:14px;">нет данных</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+
 <script>
   // ===== helpers =====
   async function api(path, opts = {}) {
@@ -258,16 +309,138 @@
     routes: [],
     presets: [],
     jobs: [],
+    editingRouteId: null,
+    editingPresetId: null,
     currentJobId: null,
     pollTimer: null,
     resultsTimer: null,
     lastPricesMap: new Map(), // key: s|r|p -> price
     onlyChanges: false,
+    logsSort: 'time',
   };
 
   const el = (id)=>document.getElementById(id);
 
-  // ===== render left lists =====
+  // ===== form reset helpers (ВАЖНО: для "Добавить" формы должны быть пустыми) =====
+  function resetRouteForm() {
+    el('r-cityFrom').value = '';
+    el('r-cityTo').value = '';
+    el('r-distance').value = '';
+  }
+
+  function resetPresetForm() {
+    el('p-places').value = '';
+    el('p-weight').value = '';
+    el('p-volume').value = '';
+    if (pW) pW.value = '';
+    if (pH) pH.value = '';
+    if (pL) pL.value = '';
+  }
+
+  // ===== presets volume calc =====
+  const pPlaces = el('p-places');
+  const pVolume = el('p-volume');
+  const pW = el('p-w');
+  const pH = el('p-h');
+  const pL = el('p-l');
+  // ВНИМАНИЕ: поле "объём" в UI — это объём НА 1 МЕСТО (м³).
+  // В БД по-прежнему хранится общий объём (объём_на_место * кол-во_мест).
+  let _dimsVolumeLock = false;
+
+  function recalcVolumeFromDims() {
+    if (_dimsVolumeLock) return;
+    _dimsVolumeLock = true;
+    try {
+      const w = parseFloat(pW?.value) || 0;
+      const h = parseFloat(pH?.value) || 0;
+      const l = parseFloat(pL?.value) || 0;
+
+      // объём на 1 место, м³
+      const vPerPlace = (w * h * l) / 1_000_000;
+      pVolume.value = vPerPlace ? vPerPlace.toFixed(3) : '';
+    } finally {
+      _dimsVolumeLock = false;
+    }
+  }
+
+  function recalcDimsFromVolume() {
+    if (_dimsVolumeLock) return;
+    _dimsVolumeLock = true;
+    try {
+      const vPerPlace = parseFloat(pVolume?.value) || 0;
+      if (!vPerPlace || vPerPlace <= 0) return;
+
+      const targetCm3 = vPerPlace * 1_000_000;
+
+      const w = parseFloat(pW?.value) || 0;
+      const h = parseFloat(pH?.value) || 0;
+      const l = parseFloat(pL?.value) || 0;
+
+      const filled = [
+        { k: 'w', v: w },
+        { k: 'h', v: h },
+        { k: 'l', v: l },
+      ].filter(x => x.v > 0);
+
+      const setWHL = (nw, nh, nl) => {
+        if (pW) pW.value = String(Math.max(1, Math.ceil(nw)));
+        if (pH) pH.value = String(Math.max(1, Math.ceil(nh)));
+        if (pL) pL.value = String(Math.max(1, Math.ceil(nl)));
+      };
+
+
+      if (filled.length === 0) {
+        // нет размеров → делаем «куб» по объёму
+        const side = Math.cbrt(targetCm3);
+        setWHL(side, side, side);
+        return;
+      }
+
+      if (filled.length === 1) {
+        // один размер задан → два остальных делаем равными
+        const known = filled[0].v;
+        const other = Math.sqrt(targetCm3 / known);
+        if (!isFinite(other) || other <= 0) return;
+
+        if (filled[0].k === 'w') setWHL(known, other, other);
+        if (filled[0].k === 'h') setWHL(other, known, other);
+        if (filled[0].k === 'l') setWHL(other, other, known);
+        return;
+      }
+
+      if (filled.length === 2) {
+        // два размера заданы → третий считаем точно
+        const a = filled[0], b = filled[1];
+        const third = targetCm3 / (a.v * b.v);
+        if (!isFinite(third) || third <= 0) return;
+
+        if (!w) { setWHL(third, h, l); return; }
+        if (!h) { setWHL(w, third, l); return; }
+        if (!l) { setWHL(w, h, third); return; }
+        return;
+      }
+
+      // 3 dims заполненыв
+
+      const curCm3 = w * h * l;
+
+      if (!isFinite(curCm3) || curCm3 <= 0) return;
+
+      const scale = Math.cbrt(targetCm3 / curCm3);
+
+      if (!isFinite(scale) || scale <= 0) return;
+
+      setWHL(w * scale, h * scale, l * scale);
+    } finally {
+      _dimsVolumeLock = false;
+    }
+  }
+
+  ;[pW, pH, pL].forEach(elm => elm && elm.addEventListener('input', recalcVolumeFromDims));
+  pPlaces && pPlaces.addEventListener('input', ()=>{/* места не влияют на объём/размеры 1 места */});
+  pVolume && pVolume.addEventListener('input', recalcDimsFromVolume);
+
+  // ===== рендер левых тем =====
   function renderSites(items) {
     state.sites = items || [];
     const ul = el('sitesList');
@@ -281,6 +454,11 @@
     // фильтр
     const siteSel = el('siteFilter');
     siteSel.innerHTML = '<option value="">все</option>' + items.map(s=>`<option value="${s.id}">${s.name}</option>`).join('');
+
+    const logsSiteSel = el('logsSiteFilter');
+    if (logsSiteSel) {
+      logsSiteSel.innerHTML = '<option value="">все</option>' + items.map(s=>`<option value="${s.id}">${s.name}</option>`).join('');
+    }
   }
 
   function renderRoutes(items) {
@@ -290,9 +468,9 @@
     items.forEach(it => {
       const li = document.createElement('li');
       li.dataset.id = it.id;
-      const dist = (it.distance_km ?? '—');
       li.innerHTML = `
-        <span>${it.from_city} → ${it.to_city} <span class="muted mono" style="font-weight:600"></span></span>
+        <span>${it.from_city} → ${it.to_city}</span>
+        <button class="edit-btn" data-type="route" data-id="${it.id}" title="Редактировать маршрут">✎</button>
         <button class="del-btn" data-type="route" data-id="${it.id}" title="Удалить маршрут">×</button>
       `;
       ul.appendChild(li);
@@ -310,17 +488,23 @@
       li.dataset.id = it.id;
       const places = it.places ?? 1;
       const w = (it.weight_kg ?? '—');
-      const v = (it.volume_m3 ?? '—');
+      const vPer = (typeof it.volume_m3 === 'number') ? it.volume_m3 : null;
+      const vPerF = (vPer == null) ? '—' : vPer.toFixed(3);
+
       li.innerHTML = `
-        <span>${w} кг · ${v} м³</span>
+        <span>${w} кг · ${vPerF} м³</span>
         <span class="tag">${places} мест</span>
+        <button class="edit-btn" data-type="preset" data-id="${it.id}" title="Редактировать пресет">✎</button>
         <button class="del-btn" data-type="preset" data-id="${it.id}" title="Удалить пресет">×</button>
       `;
       ul.appendChild(li);
     });
     const presetSel = el('presetFilter');
     presetSel.innerHTML = '<option value="">все</option>' + items.map(p=>{
-      const title = `${p.weight_kg}кг · ${p.volume_m3}м³ · ${p.places}м`;
+      const places = p.places || 1;
+      const vPer = (typeof p.volume_m3 === 'number') ? p.volume_m3 : null;
+      const vPerF = (vPer == null) ? '—' : vPer.toFixed(3);
+      const title = `${p.weight_kg}кг · ${vPerF}м³ · ${places}м`;
       return `<option value="${p.id}">${title}</option>`;
     }).join('');
   }
@@ -336,6 +520,24 @@
 
   // ===== delete actions (left lists) =====
   el('routesList')?.addEventListener('click', async (e) => {
+    const edit = e.target.closest('.edit-btn');
+    if (edit) {
+      const id = Number(edit.dataset.id);
+      const r = state.routes.find(x => x.id === id);
+      if (!r) return;
+
+      state.editingRouteId = id;
+      el('routeTitle').textContent = 'Редактировать маршрут';
+      el('saveRoute').textContent = 'Сохранить';
+
+      el('r-cityFrom').value = r.from_city || '';
+      el('r-cityTo').value = r.to_city || '';
+      el('r-distance').value = (r.distance_km ?? '') === null ? '' : String(r.distance_km ?? '');
+
+      openModal('routeModal');
+      return;
+    }
+
     const btn = e.target.closest('.del-btn');
     if (!btn) return;
     const id = btn.dataset.id;
@@ -349,6 +551,46 @@
   });
 
   el('presetsList')?.addEventListener('click', async (e) => {
+    const edit = e.target.closest('.edit-btn');
+    if (edit) {
+      const id = Number(edit.dataset.id);
+      const p = state.presets.find(x => x.id === id);
+      if (!p) return;
+
+      state.editingPresetId = id;
+      el('presetTitle').textContent = 'Редактировать пресет';
+      el('savePreset').textContent = 'Сохранить';
+
+      const places = p.places ?? 1;
+      el('p-places').value = String(places);
+      el('p-weight').value = String(p.weight_kg ?? '');
+
+      // В UI объём НА 1 место, в БД общий
+      const vPer = (typeof p.volume_m3 === 'number') ? p.volume_m3 : null;
+      el('p-volume').value = (vPer == null) ? '' : vPer.toFixed(3);
+
+      // dims_cm_json -> поля
+      try {
+        const dims = p.dims_cm_json ? JSON.parse(p.dims_cm_json) : null;
+        if (dims) {
+          if (pW) pW.value = dims.w ? String(dims.w) : '';
+          if (pH) pH.value = dims.h ? String(dims.h) : '';
+          if (pL) pL.value = dims.l ? String(dims.l) : '';
+        } else {
+          if (pW) pW.value = '';
+          if (pH) pH.value = '';
+          if (pL) pL.value = '';
+        }
+      } catch {
+        if (pW) pW.value = '';
+        if (pH) pH.value = '';
+        if (pL) pL.value = '';
+      }
+
+      openModal('presetModal');
+      return;
+    }
+
     const btn = e.target.closest('.del-btn');
     if (!btn) return;
     const id = btn.dataset.id;
@@ -374,10 +616,41 @@
     m.setAttribute('aria-hidden','true');
     document.body.style.overflow='';
   }
-  el('addRouteBtn')?.addEventListener('click', (e)=>{ e.stopPropagation(); openModal('routeModal'); });
-  el('addPresetBtn')?.addEventListener('click', (e)=>{ e.stopPropagation(); openModal('presetModal'); });
+
+  // ✅ FIX: "Добавить" должно открываться пустым (и маршрут, и пресет)
+  el('addRouteBtn')?.addEventListener('click', (e)=>{
+    e.stopPropagation();
+    state.editingRouteId = null;
+    el('routeTitle').textContent = 'Добавить маршрут';
+    el('saveRoute').textContent = 'Добавить';
+    resetRouteForm();
+    openModal('routeModal');
+  });
+
+  el('addPresetBtn')?.addEventListener('click', (e)=>{
+    e.stopPropagation();
+    state.editingPresetId = null;
+    el('presetTitle').textContent = 'Добавить пресет';
+    el('savePreset').textContent = 'Добавить';
+    resetPresetForm();
+    openModal('presetModal');
+  });
+
   document.querySelectorAll('[data-close]')?.forEach(elm=>{
     elm.addEventListener('click', (ev)=> closeModal(ev.currentTarget.getAttribute('data-close')));
+  });
+
+  // ===== logs modal =====
+  el('logsBtn')?.addEventListener('click', async ()=>{
+    openModal('logsModal');
+    await loadLogs();
+  });
+  el('logsSiteFilter')?.addEventListener('change', ()=> loadLogs());
+  el('logsSort')?.addEventListener('change', (e)=>{ state.logsSort = e.target.value || 'time'; loadLogs(); });
+  el('logsBody')?.addEventListener('click', (e)=>{
+    const cell = e.target.closest('.log-error');
+    if (!cell) return;
+    cell.classList.toggle('expanded');
   });
 
   // ===== create route =====
@@ -389,40 +662,35 @@
       const dist = parseInt(el('r-distance').value || '0', 10);
       if (!from || !to) return alert('Заполните оба города');
 
-      await api('/api/routes', {
-        method: 'POST',
-        body: JSON.stringify({
-          from_city: from,
-          to_city: to,
-          distance_km: isNaN(dist) ? null : dist
-        })
-      });
+      const payload = {
+        from_city: from,
+        to_city: to,
+        distance_km: isNaN(dist) ? null : dist
+      };
+
+      if (state.editingRouteId) {
+        await api(`/api/routes/${state.editingRouteId}`, {
+          method: 'PUT',
+          body: JSON.stringify(payload)
+        });
+      } else {
+        await api('/api/routes', {
+          method: 'POST',
+          body: JSON.stringify(payload)
+        });
+      }
 
       const routes = await api('/api/routes');
       renderRoutes(routes);
 
+      state.editingRouteId = null;
+      el('routeTitle').textContent = 'Добавить маршрут';
+      el('saveRoute').textContent = 'Добавить';
+
       closeModal('routeModal');
-      el('r-cityFrom').value = '';
-      el('r-cityTo').value = '';
-      el('r-distance').value = '';
+      resetRouteForm();
     } catch (err) { alert('Ошибка: ' + err.message); }
   });
-
-  // ===== presets volume calc =====
-  const pPlaces = el('p-places');
-  const pVolume = el('p-volume');
-  const pW = el('p-w');
-  const pH = el('p-h');
-  const pL = el('p-l');
-  function recalcVolumeFromDims() {
-    const w = parseFloat(pW?.value) || 0;
-    const h = parseFloat(pH?.value) || 0;
-    const l = parseFloat(pL?.value) || 0;
-    const places = parseInt(pPlaces?.value || '1', 10) || 1;
-    const v = (w * h * l) / 1_000_000 * places;
-    pVolume.value = v ? v.toFixed(3) : '';
-  }
-  ;[pW, pH, pL, pPlaces].forEach(elm => elm && elm.addEventListener('input', recalcVolumeFromDims));
 
   // ===== save preset =====
   el('savePreset')?.addEventListener('click', async ()=>{
@@ -436,26 +704,38 @@
       const l = parseFloat(pL?.value || '0') || 0;
       const dims = (w || h || l) ? { w, h, l } : null;
 
-      await api('/api/presets', {
-        method: 'POST',
-        body: JSON.stringify({
-          places: isNaN(places) ? 1 : places,
-          weight_kg: isNaN(weight) ? 0 : weight,
-          volume_m3: isNaN(volume) ? 0 : volume,
-          dims_cm_json: dims ? JSON.stringify(dims) : null
-        })
-      });
+      const placesNorm = isNaN(places) ? 1 : places;
 
+      const payload = {
+        places: placesNorm,
+        weight_kg: isNaN(weight) ? 0 : weight,
+        // в БД хранится общий объём
+        volume_m3: isNaN(volume) ? 0 : volume,
+        dims_cm_json: dims ? JSON.stringify(dims) : null
+      };
+
+      if (state.editingPresetId) {
+        await api(`/api/presets/${state.editingPresetId}`, {
+          method: 'PUT',
+          body: JSON.stringify(payload)
+        });
+      } else {
+        await api('/api/presets', {
+          method: 'POST',
+          body: JSON.stringify(payload)
+        });
+      }
       const presets = await api('/api/presets');
       renderPresets(presets);
 
+      state.editingPresetId = null;
+      el('presetTitle').textContent = 'Добавить пресет';
+      el('savePreset').textContent = 'Добавить';
+
       closeModal('presetModal');
-      el('p-places').value = '1';
-      el('p-weight').value = '';
-      el('p-volume').value = '';
-      if (pW) pW.value = '';
-      if (pH) pH.value = '';
-      if (pL) pL.value = '';
+
+      // ✅ FIX: после сохранения тоже чистим (чтобы следующее "Добавить" было пустым)
+      resetPresetForm();
     } catch (err) { alert('Ошибка: ' + err.message); }
   });
 
@@ -538,11 +818,35 @@
       URL.revokeObjectURL(url);
     } catch (e) {
       console.error(e);
-      alert('Не удалось выполнить экспорт');
+      alert('?? ??????? ????????? ???????');
     }
   });
 
-  // старт расчёта
+  // ??????? ??
+  el('exportDbBtn')?.addEventListener('click', async () => {
+    try {
+      const resp = await fetch('/api/buttons/export_db', { method: 'GET' });
+      if (!resp.ok) throw new Error(await resp.text());
+
+      const dispo = resp.headers.get('Content-Disposition') || '';
+      const m = dispo.match(/filename\*?=(?:UTF-8''|")?([^";]+)/i);
+      const filename = m ? decodeURIComponent(m[1]) : 'database.db';
+
+      const blob = await resp.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error(e);
+      alert('?? ??????? ??????? ??');
+    }
+  });
+
   el('runCalcBtn')?.addEventListener('click', async ()=>{
     const btn = el('runCalcBtn');
     const lastEl = el('lastUpdate');
@@ -622,8 +926,38 @@
   function routeName(id){ const r = state.routes.find(x=>x.id===id); return r ? `${r.from_city} → ${r.to_city}` : `#${id}`; }
   function presetName(id){
     const p = state.presets.find(x=>x.id===id);
-    return p ? `${p.weight_kg}кг · ${p.volume_m3}м³ · ${p.places}м` : `#${id}`;
+    const places = p.places || 1;
+    const vPer = (typeof p.volume_m3 === 'number') ? p.volume_m3 : null;
+    const vPerF = (vPer == null) ? '—' : vPer.toFixed(3);
+    return p ? `${p.weight_kg}кг · ${vPerF}м³ · ${places}м` : `#${id}`;
   }
+
+  function _contextFromRow(r){
+    const raw = r && (r.context_json || r.context);
+    if (!raw) return null;
+    try { return JSON.parse(raw); } catch (e) { return null; }
+  }
+
+  function routeLabel(r){
+    const c = _contextFromRow(r);
+    let from = null, to = null;
+    if (Array.isArray(c)) { from = c[0]; to = c[1]; }
+    else if (c && typeof c === 'object') { from = c.from_city; to = c.to_city; }
+    if (from && to) return `${from} ? ${to}`;
+    return routeName(r.id_route);
+  }
+
+  function presetLabel(r){
+    const c = _contextFromRow(r);
+    let places = null, weight = null, volume = null;
+    if (Array.isArray(c)) { places = c[2]; weight = c[3]; volume = c[4]; }
+    else if (c && typeof c === 'object') { places = c.places; weight = c.weight_kg; volume = c.volume_m3; }
+    if (weight == null || volume == null || places == null) return presetName(r.id_preset);
+    const v = Number(volume);
+    const vStr = Number.isFinite(v) ? v.toFixed(3) : String(volume);
+    return `${weight}?? ? ${vStr}?? ? ${places}?`;
+  }
+
 
   function renderResults(items){
     const tbody = el('resultsBody');
@@ -663,8 +997,8 @@
 
       tr.innerHTML = `
         <td>${siteName(r.id_site)}</td>
-        <td>${routeName(r.id_route)}</td>
-        <td>${presetName(r.id_preset)}</td>
+        <td>${routeLabel(r)}</td>
+        <td>${presetLabel(r)}</td>
         <td>${priceText} ${deltaHtml}</td>
         <td>${r.days ?? '—'}</td>
         <td class="mono col-time">${when}</td>
@@ -677,6 +1011,71 @@
     setTimeout(()=>{
       tbody.querySelectorAll('tr.flash').forEach(tr=>tr.classList.remove('flash'));
     }, 400);
+  }
+
+  // ===== LOGS =====
+  function renderLogs(items){
+    const tbody = el('logsBody');
+    if (!tbody) return;
+    tbody.innerHTML = '';
+    if (!items.length){
+      const tr = document.createElement('tr');
+      tr.className = 'muted';
+      tr.innerHTML = `<td colspan="8" style="text-align:center; padding:14px;">нет данных</td>`;
+      tbody.appendChild(tr);
+      return;
+    }
+    items.forEach(r=>{
+      const tr = document.createElement('tr');
+      const priceText = (r.price == null) ? '<span class="muted">—</span>' : `<span class="mono" style="font-weight:800">${r.price}</span>`;
+      const status = (r.status || 'ok').toLowerCase();
+      const statusClass = 'status-' + status.replace(/[^a-z0-9_-]/gi,'-');
+      const err = r.error ? String(r.error) : '—';
+      tr.innerHTML = `
+        <td>${siteName(r.id_site)}</td>
+        <td>${routeLabel(r)}</td>
+        <td>${presetLabel(r)}</td>
+        <td>${priceText}</td>
+        <td>${r.days ?? '—'}</td>
+        <td><span class="log-status ${statusClass}">${status}</span></td>
+        <td class="log-error" title="${err}">${err}</td>
+        <td class="mono col-time">${r.created_at ?? ''}</td>
+      `;
+      tbody.appendChild(tr);
+    });
+  }
+
+  function sortLogs(items){
+    if (state.logsSort === 'site'){
+      return (items || []).slice().sort((a,b)=>{
+        const sa = siteName(a.id_site).toLowerCase();
+        const sb = siteName(b.id_site).toLowerCase();
+        if (sa !== sb) return sa.localeCompare(sb);
+        return (b.id || 0) - (a.id || 0);
+      });
+    }
+    return (items || []).slice().sort((a,b)=> (b.id || 0) - (a.id || 0));
+  }
+
+  async function loadLogs(){
+    try{
+      const job_id = el('jobSelect')?.value || undefined;
+      const site_id = el('logsSiteFilter')?.value || undefined;
+      const url = new URL(location.origin + '/api/logs');
+      if (job_id) url.searchParams.set('job_id', job_id);
+      if (site_id) url.searchParams.set('site_id', site_id);
+      url.searchParams.set('limit', '2000');
+      const data = await api(url.toString());
+      const hint = el('logsJobHint');
+      if (hint) {
+        hint.textContent = data.job_id ? `Запуск #${data.job_id}` : 'Запуск не найден';
+        hint.className = data.job_id ? 'job-badge' : 'muted';
+      }
+      const items = sortLogs(data.items || []);
+      renderLogs(items);
+    }catch(e){
+      console.warn('logs load failed', e);
+    }
   }
 
   async function loadResults(force=false){
@@ -798,7 +1197,7 @@
     }
   })();
 
-  window.addEventListener('keydown', (e)=>{ if(e.key==='Escape'){ closeModal('routeModal'); closeModal('presetModal'); closeModal('jobsModal'); } });
+  window.addEventListener('keydown', (e)=>{ if(e.key==='Escape'){ closeModal('routeModal'); closeModal('presetModal'); closeModal('jobsModal'); closeModal('logsModal'); } });
 </script>
 </body>
 </html>

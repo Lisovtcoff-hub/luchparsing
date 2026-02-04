@@ -1,0 +1,32 @@
+stages:
+  - deploy
+
+deploy_parsing:
+  stage: deploy
+  before_script:
+    - echo $CI_REGISTRY_PASSWORD | docker login -u $CI_REGISTRY_USER --password-stdin $CI_REGISTRY
+  script:
+    - docker container stop luchparsing || true
+    - docker system prune -f
+    - docker-compose build
+    - docker-compose up -d
+    - sleep 150
+    - docker logs -n 800 luchparsing
+  tags:
+    - frontend-dev01
+  when: manual
+
+deploy_parsing_cleanup:
+  stage: deploy
+  before_script:
+    - echo $CI_REGISTRY_PASSWORD | docker login -u $CI_REGISTRY_USER --password-stdin $CI_REGISTRY
+  script:
+    - docker-compose down --volumes ||true
+    - docker system prune -f
+    - docker-compose build
+    - docker-compose up -d
+    - sleep 10
+    - docker logs -n 100 luchparsing
+  tags:
+    - frontend-dev01
+  when: manual

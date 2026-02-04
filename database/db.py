@@ -1,4 +1,4 @@
-
+﻿
 """Модуль db.
 
 Содержит прикладную логику и точки входа проекта.
@@ -107,6 +107,8 @@ class Database:
                   source      TEXT,
                   name_tarif  TEXT,
                   allowances  TEXT,
+                  status      TEXT NOT NULL DEFAULT 'ok',
+                  error       TEXT,
                   created_at  DATETIME NOT NULL DEFAULT (datetime('now')),
                   FOREIGN KEY(id_site) REFERENCES sites(id) ON DELETE CASCADE,
                   FOREIGN KEY(id_route) REFERENCES routes(id) ON DELETE CASCADE,
@@ -125,6 +127,15 @@ class Database:
             cols = [r["name"] for r in self.conn.execute("PRAGMA table_info(sites_config)").fetchall()]
             if "last_error" not in cols:
                 self.conn.execute("ALTER TABLE sites_config ADD COLUMN last_error TEXT")
+
+            # results schema migrations (non-breaking)
+            rcols = [r["name"] for r in self.conn.execute("PRAGMA table_info(results)").fetchall()]
+            if "status" not in rcols:
+                self.conn.execute("ALTER TABLE results ADD COLUMN status TEXT NOT NULL DEFAULT 'ok'")
+            if "error" not in rcols:
+                self.conn.execute("ALTER TABLE results ADD COLUMN error TEXT")
+            if "context_json" not in rcols:
+                self.conn.execute("ALTER TABLE results ADD COLUMN context_json TEXT")
 
             self.conn.executescript(
                 """
@@ -208,6 +219,20 @@ class Database:
             self.conn.commit()
             return int(rid)
 
+    def update_route(self, route_id: int, from_city: str, to_city: str, distance_km: int | None = None) -> None:
+        """Обновляет маршрут по id."""
+        with self.lock:
+            self.conn.execute(
+                """
+                UPDATE routes
+                SET from_city=?, to_city=?, distance_km=?
+                WHERE id=?
+                """,
+                (from_city, to_city, distance_km, int(route_id)),
+            )
+            self.conn.commit()
+
+
     def delete_route(self, route_id: int) -> None:
         """Удаляет маршрут по id."""
         with self.lock:
@@ -238,6 +263,20 @@ class Database:
             pid = self.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
             self.conn.commit()
             return int(pid)
+
+    def update_preset(self, preset_id: int, places: int, weight_kg: float, volume_m3: float, dims_cm_json: str | None) -> None:
+        """Обновляет пресет по id."""
+        with self.lock:
+            self.conn.execute(
+                """
+                UPDATE presets
+                SET places=?, weight_kg=?, volume_m3=?, dims_cm_json=?
+                WHERE id=?
+                """,
+                (int(places), float(weight_kg), float(volume_m3), dims_cm_json, int(preset_id)),
+            )
+            self.conn.commit()
+
 
     def delete_preset(self, preset_id: int) -> None:
         """Удаляет пресет по id."""
@@ -366,6 +405,8 @@ class Database:
         errors_json: str | None = None,
     ) -> None:
         """Обновляет статус/прогресс/ошибки задачи."""
+        if status == "running" and self.is_job_cancelled(job_id):
+            return
         parts = ["status=?"]
         params: list[Any] = [status]
         if progress is not None:
@@ -447,13 +488,16 @@ class Database:
         job_id: int | None = None,
         name_tarif: str | None = None,
         allowances: str | None = None,
+        status: str = "ok",
+        error: str | None = None,
+        context_json: str | None = None,
     ) -> int:
         """Вставляет одну строку результата и возвращает её id."""
         with self.lock:
             self.conn.execute(
                 """
-                INSERT INTO results(job_id, id_site, id_route, id_preset, price, days, currency, source, name_tarif, allowances)
-                VALUES(?,?,?,?,?,?,?,?,?,?)
+                INSERT INTO results(job_id, id_site, id_route, id_preset, price, days, currency, source, name_tarif, allowances, status, error, context_json)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     job_id,
@@ -466,6 +510,9 @@ class Database:
                     source,
                     name_tarif,
                     allowances,
+                    status or "ok",
+                    error,
+                    context_json,
                 ),
             )
             rid = self.conn.execute("SELECT last_insert_rowid()").fetchone()[0]
@@ -474,54 +521,92 @@ class Database:
 
     def insert_results_batch(
         self,
-        rows: list[tuple[int, int, int, float | None, str | None, float]],
+        rows: list[tuple],
         *,
         job_id: int | None = None,
         currency: str = "RUB",
         source: str | None = None,
-        name_tarif: str | None = None,
-        allowances: str | None = None,
     ) -> None:
-        """
-        Вставляет пачку результатов.
+        """Batch insert results.
 
-        Формат rows: (site_id, route_id, preset_id, price, days_str, created_at_unix_ts).
+        Поддерживаем 2 формата rows для обратной совместимости:
+
+        8 полей:
+          (site_id, route_id, preset_id, price, days_str, created_at_unix_ts, name_tarif, allowances)
+
+        10 полей:
+          (site_id, route_id, preset_id, price, days_str, created_at_unix_ts, name_tarif, allowances, status, error)
         """
         if not rows:
             return
+
+        # Нормализуем к 10 полям
+        norm: list[tuple] = []
+        for row in rows:
+            if len(row) == 8:
+                site_id, route_id, preset_id, price, days_str, created_ts, name_tarif, allowances = row
+                status = "ok" if price is not None else "no_price"
+                error = None
+                context_json = None
+            elif len(row) == 10:
+                site_id, route_id, preset_id, price, days_str, created_ts, name_tarif, allowances, status, error = row
+                context_json = None
+            elif len(row) == 11:
+                site_id, route_id, preset_id, price, days_str, created_ts, name_tarif, allowances, status, error, context_json = row
+            else:
+                raise ValueError(f"Unsupported row format in insert_results_batch: len={len(row)}")
+
+            norm.append(
+                (
+                    job_id,
+                    int(site_id),
+                    int(route_id),
+                    int(preset_id),
+                    price,
+                    days_str,
+                    currency or "RUB",
+                    source,
+                    name_tarif,
+                    allowances,
+                    status or "ok",
+                    error,
+                    context_json,
+                    float(created_ts),
+                )
+            )
+
         with self.lock:
             self.conn.execute("BEGIN IMMEDIATE;")
             self.conn.executemany(
                 """
-                INSERT INTO results(job_id, id_site, id_route, id_preset, price, days, currency, source, name_tarif, allowances, created_at)
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime(?,'unixepoch'))
+                INSERT INTO results(
+                  job_id, id_site, id_route, id_preset,
+                  price, days, currency, source,
+                  name_tarif, allowances,
+                  status, error, context_json,
+                  created_at
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime(?,'unixepoch'))
                 """,
-                [
-                    (
-                        job_id,
-                        int(site_id),
-                        int(route_id),
-                        int(preset_id),
-                        price,
-                        days_str,
-                        currency or "RUB",
-                        source,
-                        name_tarif,
-                        allowances,
-                        float(created_ts),
-                    )
-                    for (site_id, route_id, preset_id, price, days_str, created_ts) in rows
-                ],
+                norm,
             )
             self.conn.commit()
 
     def add_res_price_many(self, rows):
-        """Совместимость: пакетная вставка результатов без job_id."""
-        self.insert_results_batch(rows, job_id=None)
+        """Batch insert without job_id.
+
+        Pads 6-field rows with (name_tarif=None, allowances=None).
+        """
+        padded = [(s, r, p, price, days, ts, None, None, ("ok" if price is not None else "no_price"), None) for (s, r, p, price, days, ts) in rows]
+        self.insert_results_batch(padded, job_id=None)
 
     def add_res_price_many_v2(self, job_id: int, rows):
-        """Совместимость: пакетная вставка результатов с job_id."""
-        self.insert_results_batch(rows, job_id=int(job_id))
+        """Batch insert with job_id.
+
+        Pads 6-field rows with (name_tarif=None, allowances=None).
+        """
+        padded = [(s, r, p, price, days, ts, None, None, ("ok" if price is not None else "no_price"), None) for (s, r, p, price, days, ts) in rows]
+        self.insert_results_batch(padded, job_id=int(job_id))
 
     def get_results(
         self,
@@ -548,25 +633,108 @@ class Database:
             where.append("id_preset=?")
             params.append(int(preset_id))
 
-        sql = f"""
-        SELECT id, job_id, id_site, id_route, id_preset, price, days, currency, source, name_tarif, allowances, created_at
-        FROM results
-        {"WHERE " + " AND ".join(where) if where else ""}
-        ORDER BY id DESC
-        LIMIT ?
-        """
+        where_sql = ("WHERE " + " AND ".join(where)) if where else ""
+
+        # Внутри одного job мы можем писать повторные попытки (tail retry). Чтобы UI не видел
+        # "дубликаты" одной и той же пары (site, route, preset), возвращаем только самую
+        # свежую запись по каждому ключу.
+        if job_id is not None:
+            sql = f"""
+            WITH latest AS (
+                SELECT MAX(id) AS id
+                FROM results
+                {where_sql}
+                GROUP BY id_site, id_route, id_preset
+            )
+            SELECT r.id, r.job_id, r.id_site, r.id_route, r.id_preset, r.price, r.days, r.currency, r.source,
+                   r.name_tarif, r.allowances, r.status, r.error, r.context_json, r.created_at
+            FROM results r
+            JOIN latest l ON l.id = r.id
+            ORDER BY r.id DESC
+            LIMIT ?
+            """
+        else:
+            sql = f"""
+            SELECT id, job_id, id_site, id_route, id_preset, price, days, currency, source, name_tarif, allowances, status, error, context_json, created_at
+            FROM results
+            {where_sql}
+            ORDER BY id DESC
+            LIMIT ?
+            """
+
         params.append(int(limit))
 
         with self.lock:
             cur = self.conn.execute(sql, tuple(params))
             return [dict(r) for r in cur.fetchall()]
 
+    def get_results_raw(
+        self,
+        *,
+        job_id: int,
+        site_id: int | None = None,
+        limit: int = 2000,
+    ) -> list[dict]:
+        """Возвращает результаты без дедупликации (для логов)."""
+        params: list[Any] = [int(job_id)]
+        where: list[str] = ["job_id=?"]
+        if site_id is not None:
+            where.append("id_site=?")
+            params.append(int(site_id))
+
+        where_sql = "WHERE " + " AND ".join(where)
+        sql = f"""
+        SELECT id, job_id, id_site, id_route, id_preset, price, days, currency, source,
+               name_tarif, allowances, status, error, context_json, created_at
+        FROM results
+        {where_sql}
+        ORDER BY id DESC
+        LIMIT ?
+        """
+        params.append(int(limit))
+        with self.lock:
+            cur = self.conn.execute(sql, tuple(params))
+            return [dict(r) for r in cur.fetchall()]
+
+    def get_results_by_keys(
+        self,
+        *,
+        job_id: int,
+        keys: list[tuple[int, int, int]],
+    ) -> list[dict]:
+        """Returns results for specific (site, route, preset) keys."""
+        if not keys:
+            return []
+        def _iter_chunks(src: list[tuple[int, int, int]], size: int):
+            for i in range(0, len(src), size):
+                yield src[i:i + size]
+        out: list[dict] = []
+        with self.lock:
+            for chunk in _iter_chunks(keys, 300):
+                placeholders = ",".join(["(?,?,?)"] * len(chunk))
+                params: list[Any] = [int(job_id)]
+                for site_id, route_id, preset_id in chunk:
+                    params.extend([int(site_id), int(route_id), int(preset_id)])
+                sql = f"""
+                SELECT r.id, r.job_id, r.id_site, r.id_route, r.id_preset, r.price, r.days, r.currency, r.source,
+                       r.name_tarif, r.allowances, r.status, r.error, r.context_json, r.created_at
+                FROM results r
+                JOIN (
+                    SELECT MAX(id) AS id
+                    FROM results
+                    WHERE job_id=? AND (id_site, id_route, id_preset) IN ({placeholders})
+                    GROUP BY id_site, id_route, id_preset
+                ) t ON t.id = r.id
+                """
+                cur = self.conn.execute(sql, params)
+                out.extend(dict(r) for r in cur.fetchall())
+        return out
     def get_results_full_export(self) -> list[dict]:
         """Возвращает все результаты (для экспорта/аналитики)."""
         with self.lock:
             cur = self.conn.execute(
                 """
-                SELECT job_id, id_site, id_route, id_preset, price, days, currency, source, name_tarif, allowances, created_at
+                SELECT job_id, id_site, id_route, id_preset, price, days, currency, source, name_tarif, allowances, status, error, context_json, created_at
                 FROM results
                 ORDER BY job_id, id_site, id_route, id_preset, created_at
                 """

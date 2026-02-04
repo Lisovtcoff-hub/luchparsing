@@ -1,4 +1,4 @@
-"""Модуль jde.
+﻿"""Модуль jde.
 
 Содержит прикладную логику и точки входа проекта.
 """
@@ -7,13 +7,14 @@ from __future__ import annotations
 
 import json
 import re
+import os
 import time
+import html as _html
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -23,14 +24,24 @@ from selenium.common.exceptions import TimeoutException, ElementClickIntercepted
 from core.contracts import CalcParams, CalcResult, InvalidInputError, TemporaryError
 from core.selenium_base import SyncSeleniumAdapter
 
+_CITY_ID_CACHE: Optional[dict] = None
 
-def jde_calc(from_city: str, to_city: str, weight: int, volume: float) -> Tuple[int, str, Dict[str, float]]:
+
+def _load_city_ids() -> dict:
+    global _CITY_ID_CACHE
+    if _CITY_ID_CACHE is not None:
+        return _CITY_ID_CACHE
+    city_ids_path = Path(__file__).resolve().parents[1] / "addings" / "jde_city_ids.json"
+    with city_ids_path.open("r", encoding="utf-8") as f:
+        _CITY_ID_CACHE = json.load(f)
+    return _CITY_ID_CACHE
+
+
+def jde_calc(from_city: str, to_city: str, places: int, weight: int, volume: float) -> Tuple[Optional[int], Optional[str], Dict[str, float]]:
     """
     Возвращает (итоговая_цена_руб, срок_текстом, надбавки).
     """
-    city_ids_path = Path(__file__).resolve().parents[1] / "addings" / "jde_city_ids.json"
-    with city_ids_path.open("r", encoding="utf-8") as f:
-        city_to_id = json.load(f)
+    city_to_id = _load_city_ids()
 
     if from_city not in city_to_id:
         raise ValueError(f"Неизвестный 'Откуда': {from_city!r}. Добавьте ID в addings/jde_city_ids.json.")
@@ -56,7 +67,11 @@ def jde_calc(from_city: str, to_city: str, weight: int, volume: float) -> Tuple[
     }
     chrome_options.add_experimental_option("prefs", prefs)
 
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
+    driver = webdriver.Chrome(
+        service=Service(executable_path=os.getenv("CHROMEDRIVER", "/usr/bin/chromedriver")),
+        options=chrome_options,
+    )
+
     wait = WebDriverWait(driver, 20, poll_frequency=0.2)
 
     def click_best(el):
@@ -86,6 +101,16 @@ def jde_calc(from_city: str, to_city: str, weight: int, volume: float) -> Tuple[
         """
         s = " ".join((s or "").split()).lower()
         s = s.replace("c", "с")
+        return s
+    
+    def norm_city(s: str) -> str:
+        s = (s or "").strip()
+        # берём только "город" до скобок
+        if "(" in s:
+            s = s.split("(", 1)[0]
+        s = " ".join(s.split()).lower()
+        s = s.replace("ё", "е")
+        s = s.replace("c", "с")  # на всякий, как в norm_label
         return s
 
     def extract_rub(text: str) -> int:
@@ -162,7 +187,7 @@ def jde_calc(from_city: str, to_city: str, weight: int, volume: float) -> Tuple[
         weight_input.clear()
         weight_input.send_keys(str(weight))
         volume_input.clear()
-        volume_input.send_keys(str(volume))
+        volume_input.send_keys(str(round(float(volume), 3)))
 
         try:
             WebDriverWait(driver, 3).until(EC.invisibility_of_element_located((By.CSS_SELECTOR, ".select2-container--open")))
@@ -211,6 +236,58 @@ def jde_calc(from_city: str, to_city: str, weight: int, volume: float) -> Tuple[
         WebDriverWait(driver, 15).until(lambda d: len(set(d.window_handles) - old_handles) == 1)
         new_handle = list(set(driver.window_handles) - old_handles)[0]
         driver.switch_to.window(new_handle)
+
+
+                # --- ВАЖНО: проверка подмены терминала по storage (самый надежный источник) ---
+        def get_storage_json(input_id: str) -> dict:
+            try:
+                raw = driver.find_element(By.CSS_SELECTOR, f"input#{input_id}").get_attribute("value") or ""
+                raw = raw.strip()
+                return json.loads(raw) if raw else {}
+            except Exception:
+                return {}
+
+        def pick_name(d: dict) -> str:
+            # В storages обычно есть label/value; берем что есть
+            if not d:
+                return ""
+            return (d.get("label") or d.get("value") or "").strip()
+
+
+        def storage_ready(input_id: str) -> bool:
+            try:
+                raw = driver.find_element(By.CSS_SELECTOR, f"input#{input_id}").get_attribute("value") or ""
+                return bool(raw.strip())
+            except Exception:
+                return False
+
+        try:
+            WebDriverWait(driver, 10).until(lambda d: storage_ready("derival_point_storage"))
+            WebDriverWait(driver, 10).until(lambda d: storage_ready("derival_terminal_list_storage"))
+            WebDriverWait(driver, 10).until(lambda d: storage_ready("arrival_point_storage"))
+            WebDriverWait(driver, 10).until(lambda d: storage_ready("arrival_terminal_list_storage"))
+        except TimeoutException:
+            pass
+
+        derival_point = pick_name(get_storage_json("derival_point_storage"))
+        arrival_point  = pick_name(get_storage_json("arrival_point_storage"))
+        derival_term   = pick_name(get_storage_json("derival_terminal_list_storage"))
+        arrival_term   = pick_name(get_storage_json("arrival_terminal_list_storage"))
+
+        def city_match(user_city: str, parsed_city: str) -> bool:
+            a = norm_city(user_city)
+            b = norm_city(parsed_city)
+            return bool(a and b and (a in b or b in a))
+
+        if derival_term and not city_match(from_city, derival_term):
+            return None, None, {}
+
+        if arrival_term and not city_match(to_city, arrival_term):
+            return None, None, {}
+
+
+
+
 
         try:
             acc_btn = WebDriverWait(driver, 20).until(
@@ -280,6 +357,7 @@ class JdeAdapter(SyncSeleniumAdapter):
             price_rub, days_text, allowances = jde_calc(
                 p.from_city,
                 p.to_city,
+                int(p.places),
                 int(round(p.weight_kg)),
                 float(p.volume_m3),
             )
@@ -300,4 +378,6 @@ class JdeAdapter(SyncSeleniumAdapter):
         )
 
 
+
 __all__ = ["jde_calc", "JdeAdapter"]
+

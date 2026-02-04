@@ -5,6 +5,22 @@
 
 from __future__ import annotations
 
+import os
+import re
+import time
+from typing import Optional
+
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support.ui import WebDriverWait, Select
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, WebDriverException
+
+from core.contracts import CalcParams, CalcResult, InvalidInputError, TemporaryError
+from core.selenium_base import SyncSeleniumAdapter
+
 
 CITY_TO_VALUE = {
     "Абакан": "405",
@@ -39,37 +55,21 @@ CITY_TO_VALUE = {
     "Челябинск": "27",
 }
 
-import re
-import time
-
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
-from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support.ui import WebDriverWait, Select
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException
-
-from core.contracts import CalcParams, CalcResult, InvalidInputError, TemporaryError
-from core.selenium_base import SyncSeleniumAdapter
-
-
 EXPRESSAVTO_SOURCE = "https://expressauto.ru/"
 
 
 def _wait_stable_total(
-    driver,
+    driver: webdriver.Chrome,
     css: str,
-    timeout: float = 35.0,
+    timeout: float = 45.0,
     stable_for: float = 2.0,
     poll: float = 0.1,
 ) -> int:
     end = time.time() + timeout
-    last_val = None
+    last_val: Optional[int] = None
     last_change = time.time()
     seen_change = False
-    max_seen = None
+    max_seen: Optional[int] = None
 
     while time.time() < end:
         try:
@@ -106,18 +106,7 @@ def _wait_stable_total(
     raise TimeoutException("calc_total did not become numeric in time")
 
 
-def expressavto(from_city: str, to_city: str, weight: int, volume: float) -> int:
-    """Функция expressavto.
-
-    Параметры:
-        from_city: Описание параметра.
-        to_city: Описание параметра.
-        weight: Описание параметра.
-        volume: Описание параметра.
-
-    Возвращает:
-        Результат выполнения функции.
-    """
+def expressavto(from_city: str, to_city: str, places: int, weight: int, volume: float) -> int:
     try:
         from_value = CITY_TO_VALUE[from_city]
     except KeyError:
@@ -127,7 +116,8 @@ def expressavto(from_city: str, to_city: str, weight: int, volume: float) -> int
     except KeyError:
         raise ValueError(f"Неизвестный город 'куда': {to_city!r}. Добавьте его в CITY_TO_VALUE.")
 
-    service = Service(ChromeDriverManager().install())
+    service = Service(executable_path=os.getenv("CHROMEDRIVER", "/usr/bin/chromedriver"))
+
     chrome_options = webdriver.ChromeOptions()
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--disable-gpu")
@@ -137,6 +127,8 @@ def expressavto(from_city: str, to_city: str, weight: int, volume: float) -> int
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--disable-extensions")
     chrome_options.add_argument("--disable-infobars")
+    chrome_options.add_argument("--lang=ru-RU")
+
     prefs = {
         "profile.managed_default_content_settings.images": 2,
         "profile.default_content_setting_values.notifications": 2,
@@ -144,24 +136,19 @@ def expressavto(from_city: str, to_city: str, weight: int, volume: float) -> int
     }
     chrome_options.add_experimental_option("prefs", prefs)
 
-    driver = webdriver.Chrome(service=service, options=chrome_options)
-    driver.set_page_load_timeout(20)
-    wait = WebDriverWait(driver, 12, poll_frequency=0.2)
-
+    driver = None
     try:
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+        driver.set_page_load_timeout(25)
+        wait = WebDriverWait(driver, 15, poll_frequency=0.2)
+
         driver.get(EXPRESSAVTO_SOURCE)
+
+        # Иногда калькулятор появляется не сразу, ждееееееееем
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".calc_place")))
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, ".calc_place .calculator")))
 
-        def select_visible_option(css_selector: str, value: str):
-            """Функция select_visible_option.
-
-            Параметры:
-                css_selector: Описание параметра.
-                value: Описание параметра.
-
-            Возвращает:
-                Результат выполнения функции.
-            """
+        def select_visible_option(css_selector: str, value: str) -> None:
             sel = wait.until(
                 EC.visibility_of_element_located((By.CSS_SELECTOR, f"{css_selector}:not([style*='display:none'])"))
             )
@@ -170,7 +157,6 @@ def expressavto(from_city: str, to_city: str, weight: int, volume: float) -> int
                 "var el=arguments[0]; var ev=new Event('change',{bubbles:true}); el.dispatchEvent(ev);",
                 sel,
             )
-            return sel
 
         select_visible_option("select.c_from_select", from_value)
         select_visible_option("select.c_to_select", to_value)
@@ -178,56 +164,53 @@ def expressavto(from_city: str, to_city: str, weight: int, volume: float) -> int
         weight_input = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "input.ci_weight")))
         volume_input = wait.until(EC.element_to_be_clickable((By.CSS_SELECTOR, "input.ci_volume")))
 
+        # Вес
+        weight_input.click()
         weight_input.send_keys(Keys.CONTROL, "a")
         weight_input.send_keys(Keys.BACKSPACE)
         weight_input.send_keys(f"{weight}")
         driver.execute_script("arguments[0].dispatchEvent(new Event('input',{bubbles:true}));", weight_input)
         driver.execute_script("arguments[0].dispatchEvent(new Event('change',{bubbles:true}));", weight_input)
-        driver.execute_script("arguments[0].dispatchEvent(new KeyboardEvent('keyup',{bubbles:true}));", weight_input)
         weight_input.send_keys(Keys.TAB)
 
+        # Объём
+        volume_input.click()
         volume_input.send_keys(Keys.CONTROL, "a")
         volume_input.send_keys(Keys.BACKSPACE)
-        volume_input.send_keys(f"{volume}")
-        time.sleep(0.2)
+        volume_input.send_keys(f"{round(float(volume), 3)}")
         driver.execute_script("arguments[0].dispatchEvent(new Event('input',{bubbles:true}));", volume_input)
         driver.execute_script("arguments[0].dispatchEvent(new Event('change',{bubbles:true}));", volume_input)
-        driver.execute_script("arguments[0].dispatchEvent(new KeyboardEvent('keyup',{bubbles:true}));", volume_input)
         volume_input.send_keys(Keys.TAB)
 
         wait.until(EC.visibility_of_element_located((By.CSS_SELECTOR, ".calc_place .calc_total")))
-        return _wait_stable_total(driver, ".calc_place .calc_total", timeout=35.0, stable_for=2.0, poll=0.1)
+        return _wait_stable_total(driver, ".calc_place .calc_total", timeout=45.0, stable_for=2.0, poll=0.1)
 
+    except TimeoutException as e:
+        raise TemporaryError(f"expressavto: timeout waiting for price: {e}") from e
+    except WebDriverException as e:
+        raise TemporaryError(f"expressavto: webdriver error: {type(e).__name__}: {e}") from e
     finally:
-        driver.quit()
+        if driver is not None:
+            try:
+                driver.quit()
+            except Exception:
+                pass
 
 
 class ExpressAvtoAdapter(SyncSeleniumAdapter):
-    """Класс ExpressAvtoAdapter.
-
-    Инкапсулирует связанную функциональность модуля.
-    """
     code = "expressavto"
     TIMEOUT = 60.0
     HEADLESS = True
 
     def _calc_sync(self, p: CalcParams) -> CalcResult:
-        """Функция _calc_sync.
-
-        Параметры:
-            p: Описание параметра.
-
-        Возвращает:
-            Результат выполнения функции.
-        """
         try:
-            price = expressavto(p.from_city, p.to_city, int(round(p.weight_kg)), float(p.volume_m3))
+            price = expressavto(p.from_city, p.to_city, int(p.places), int(round(p.weight_kg)), float(p.volume_m3))
         except ValueError as e:
             raise InvalidInputError(str(e)) from e
         except TemporaryError:
             raise
         except Exception as e:
-            raise TemporaryError(f"expressavto: unexpected {type(e).__name__}") from e
+            raise TemporaryError(f"expressavto: unexpected {type(e).__name__}: {e}") from e
 
         return CalcResult(
             price=float(price) if price is not None else None,

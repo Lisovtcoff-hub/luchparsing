@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import json
+import ast
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Tuple, cast
@@ -84,7 +86,7 @@ def _fmt_preset_header(preset: dict) -> str:
     """
     places = preset["places"]
     weight = preset["weight_kg"]
-    vol = preset["volume_m3"]
+    vol = round(float(preset["volume_m3"]), 3)
     weight_str = int(weight) if float(weight).is_integer() else weight
     s = f"{weight_str}".replace(".", ",")
     v = f"{vol}".replace(".", ",")
@@ -94,19 +96,36 @@ def _fmt_preset_header(preset: dict) -> str:
 def _autosize(ws: Worksheet) -> None:
     """Функция _autosize.
 
+    Автоширина подбирается по содержимому, но для отдельных колонок задаются
+    более узкие ограничения (например, для цены и дней).
+
     Параметры:
         ws: Описание параметра.
     """
     for col in ws.columns:
         max_len = 1
-        col_letter = get_column_letter(col[0].column)
+        col_idx = col[0].column
+        col_letter = get_column_letter(col_idx)
+
+        header_val = ws.cell(row=1, column=col_idx).value
+        header = "" if header_val is None else str(header_val)
+
         for cell in col:
             val = "" if cell.value is None else str(cell.value)
             if "\n" in val:
                 max_len = max(max_len, max(len(line) for line in val.splitlines()))
             else:
                 max_len = max(max_len, len(val))
-        ws.column_dimensions[col_letter].width = min(max(12, max_len + 2), 52)
+
+        min_w, max_w, pad = 12, 52, 2
+
+        if "Цена" in header:
+            min_w, max_w, pad = 8, 18, 1
+
+        if header.strip() == "Дни":
+            min_w, max_w, pad = 6, 10, 1
+
+        ws.column_dimensions[col_letter].width = min(max(min_w, max_len + pad), max_w)
 
 
 def _border_with(
@@ -142,8 +161,8 @@ def _apply_table_styles(ws: Worksheet, rows_count: int, cols_count: int, presets
     - тонкие границы по всем ячейкам
     - жирная шапка
     - жирная рамка по периметру всей таблицы
-    - жирная рамка блока A:B (Компания/Тариф)
-    - жирные разделители после каждого пресета (Цена/Дни/Доп.услуги)
+    - жирная рамка блока A:C (Компания/Дни/Тариф)
+    - жирные разделители после каждого пресета (Цена/Доп.услуги)
     """
     for r in range(1, rows_count + 1):
         for c in range(1, cols_count + 1):
@@ -173,12 +192,14 @@ def _apply_table_styles(ws: Worksheet, rows_count: int, cols_count: int, presets
     for r in range(1, rows_count + 1):
         a = ws.cell(row=r, column=1)
         b = ws.cell(row=r, column=2)
+        c = ws.cell(row=r, column=3)
         a.border = _border_with(a.border, right=MEDIUM)
         b.border = _border_with(b.border, left=MEDIUM, right=MEDIUM)
+        c.border = _border_with(c.border, left=MEDIUM, right=MEDIUM)
 
 
     for i in range(1, presets_count + 1):
-        end_col = 2 + i * 3
+        end_col = 3 + i * 2
         if end_col > cols_count:
             break
         for r in range(1, rows_count + 1):
@@ -189,40 +210,50 @@ def _apply_table_styles(ws: Worksheet, rows_count: int, cols_count: int, presets
                 cn.border = _border_with(cn.border, left=MEDIUM)
 
 
-def _parse_days(value: Any) -> int | None:
-    """Функция _parse_days.
 
-    Параметры:
-        value: Описание параметра.
+def _apply_price_alignment(ws: Worksheet, presets_count: int) -> None:
+    """Принудительно выравнивает колонки цен вправо.
 
-    Возвращает:
-        Результат выполнения функции.
+    Важно: _apply_table_styles() задаёт общий CELL_ALIGN (без horizontal),
+    из-за чего Excel отображает строки слева, а числа справа.
+    Здесь мы фиксируем цены (в том числе строковые вида "1234 (+5%)")
+    как right aligned для визуальной консистентности.
+    """
+    price_align = Alignment(horizontal="right", vertical="center", wrap_text=True)
+    for r in range(2, ws.max_row + 1):
+        for i in range(presets_count):
+            price_col = 4 + i * 2
+            cell = ws.cell(row=r, column=price_col)
+            cell.alignment = price_align
+
+
+def _parse_days(value: Any) -> str | None:
+    """Нормализует поле days для вывода в Excel.
+
+    В исходных данных days встречается как строка диапазона (например, "1-2", "1 - 6"),
+    как число/строка числа ("1"), либо пустое значение.
+
+    Мы выводим days как текст (без приведения к int), чтобы не терять диапазоны.
     """
     if value is None:
         return None
-    if isinstance(value, int):
-        return value
-    try:
-        s = str(value).strip()
-        if not s:
-            return None
-        s = s.replace("–", "-").replace("—", "-")
-        if "-" in s:
-            left = s.split("-", 1)[0].strip()
-            return int(float(left.replace(",", ".")))
-        return int(float(s.replace(",", ".")))
-    except (ValueError, TypeError):
+    s = str(value).strip()
+    if not s:
         return None
+    # Нормализуем разные тире и пробелы вокруг дефиса: "1 - 6" -> "1-6"
+    s = s.replace("–", "-").replace("—", "-")
+    s = re.sub(r"\s*-\s*", "-", s)
+    return s
+
 
 
 def _parse_json_dict(value: Any) -> Dict[str, Any] | None:
-    """Функция _parse_json_dict.
+    """Парсит поле name_tarif.
 
-    Параметры:
-        value: Описание параметра.
-
-    Возвращает:
-        Результат выполнения функции.
+    Поддерживает:
+    - dict (уже распарсенный)
+    - JSON-строку
+    - строку Python-literal вида "{'A': 1, 'B': [2, '1-2']}" (часто приходит из БД)
     """
     if value is None:
         return None
@@ -233,11 +264,21 @@ def _parse_json_dict(value: Any) -> Dict[str, Any] | None:
     s = value.strip()
     if not s:
         return None
+
+    # 1) JSON
     try:
         obj = json.loads(s)
+        if isinstance(obj, dict):
+            return obj
     except (json.JSONDecodeError, TypeError, ValueError):
+        pass
+
+    # 2) Python-literal
+    try:
+        obj2 = ast.literal_eval(s)
+        return obj2 if isinstance(obj2, dict) else None
+    except (ValueError, SyntaxError):
         return None
-    return obj if isinstance(obj, dict) else None
 
 
 def _fmt_allowances(value: Any) -> str | None:
@@ -392,6 +433,7 @@ def _build_sheet_for_route(
     std_now: Dict[Tuple[int, int, int], dict],
     std_prev_price: Dict[Tuple[int, int, int], float],
     alt_tariffs: Dict[Tuple[int, int], Dict[str, Dict[int, float]]],
+    alt_tariff_days: Dict[Tuple[int, int], Dict[str, str]],
     job_label: str | None = None,
 ) -> None:
     """Функция _build_sheet_for_route.
@@ -412,92 +454,95 @@ def _build_sheet_for_route(
     full_title = f"{title_base} — {job_label}" if job_label else title_base
     ws = wb.create_sheet(_unique_sheet_title(wb, full_title))
 
-    headers: List[str] = ["Компания", "Тариф"]
+    headers: List[str] = ["Компания", "Дни", "Тариф"]
     for p in presets:
         ph = _fmt_preset_header(p)
-        headers.extend([f"{ph}\nЦена", f"{ph}\nДни", f"{ph}\nДоп. услуги"])
+        headers.extend([f"{ph}\nЦена", f"{ph}\nДоп. услуги"])
     ws.append(headers)
 
     price_right = Alignment(horizontal="right", vertical="center", wrap_text=True)
 
     for s in sites:
-        site_id = s["id"]
-        route_id = route["id"]
+        site_id = int(s["id"]) if s.get("id") is not None else s["id"]
+        route_id = int(route["id"]) if route.get("id") is not None else route["id"]
         site_name = s.get("name") or ""
         site_link = s.get("link")
 
         site_block_start_row = ws.max_row + 1
+        if site_id != 11:
+            row: List[Any] = [None] * (3 + len(presets) * 2)
+            row[0] = site_name
+            row[2] = "Стандарт"
 
+            first_days: str | None = None
 
-        row: List[Any] = [None] * (2 + len(presets) * 3)
-        row[0] = site_name
-        row[1] = "Стандарт"
+            for i, p in enumerate(presets):
+                preset_id = int(p["id"])
+                k = (site_id, route_id, preset_id)
+                cell_base = 3 + i * 2
 
-        for i, p in enumerate(presets):
-            preset_id = p["id"]
-            k = (site_id, route_id, preset_id)
-            cell_base = 2 + i * 3
+                data = std_now.get(k) or {}
 
-            data = std_now.get(k) or {}
-            row[cell_base + 0] = data.get("price")
-            row[cell_base + 1] = _parse_days(data.get("days"))
-            row[cell_base + 2] = _fmt_allowances(data.get("allowances"))
+                if first_days is None:
+                    first_days = _parse_days(data.get("days"))
 
-        ws.append(row)
-        std_row_idx = ws.max_row
+                row[cell_base + 0] = data.get("price")
+                row[cell_base + 1] = _fmt_allowances(data.get("allowances"))
 
+            row[1] = first_days
+            ws.append(row)
+            std_row_idx = ws.max_row
 
-        for i, p in enumerate(presets):
-            preset_id = p["id"]
-            k = (site_id, route_id, preset_id)
+            for i, p in enumerate(presets):
+                preset_id = int(p["id"])
+                k = (site_id, route_id, preset_id)
 
-            price_col = 3 + i * 3
-            days_col = price_col + 1
-            all_col = price_col + 2
+                price_col = 4 + i * 2
+                all_col = price_col + 1
 
-            c_price = ws.cell(row=std_row_idx, column=price_col)
+                c_price = ws.cell(row=std_row_idx, column=price_col)
 
-            cur = std_now.get(k, {}).get("price")
-            prv = std_prev_price.get(k)
+                cur = std_now.get(k, {}).get("price")
+                prv = std_prev_price.get(k)
 
-            c_price.alignment = price_right
+                c_price.alignment = price_right
 
-            if isinstance(cur, (int, float)) and isinstance(prv, (int, float)) and float(cur) != float(prv):
-                c_price.value = _price_with_pct(float(cur), float(prv))
-            else:
-                if isinstance(c_price.value, (int, float)):
-                    c_price.number_format = "#,##0.00"
+                if isinstance(cur, (int, float)) and isinstance(prv, (int, float)) and float(cur) != float(prv):
+                    c_price.value = _price_with_pct(float(cur), float(prv))
+                else:
+                    if isinstance(c_price.value, (int, float)):
+                        c_price.number_format = "#,##0.00"
 
-            if cur is None or prv is None or (
-                isinstance(cur, (int, float)) and isinstance(prv, (int, float)) and float(cur) == float(prv)
-            ):
-                c_price.fill = FILL_GRAY
-            elif float(cur) < float(prv):
-                c_price.fill = FILL_GREEN
-            else:
-                c_price.fill = FILL_RED
+                if cur is None or prv is None or (
+                    isinstance(cur, (int, float)) and isinstance(prv, (int, float)) and float(cur) == float(prv)
+                ):
+                    c_price.fill = FILL_GRAY
+                elif float(cur) < float(prv):
+                    c_price.fill = FILL_GREEN
+                else:
+                    c_price.fill = FILL_RED
 
-            ws.cell(row=std_row_idx, column=days_col).fill = FILL_GRAY
-            ws.cell(row=std_row_idx, column=all_col).fill = FILL_GRAY
+                ws.cell(row=std_row_idx, column=all_col).fill = FILL_GRAY
 
 
         tariffs_for_site_route = alt_tariffs.get((site_id, route_id)) or {}
         for tname in sorted(tariffs_for_site_route.keys(), key=lambda x: str(x).lower()):
             per_preset_prices = tariffs_for_site_route.get(tname) or {}
-            trow: List[Any] = [None] * (2 + len(presets) * 3)
+            trow: List[Any] = [None] * (3 + len(presets) * 2)
             trow[0] = site_name
-            trow[1] = str(tname)
+            trow[1] = (alt_tariff_days.get((site_id, route_id)) or {}).get(str(tname))
+            trow[2] = str(tname)
 
             for i, p in enumerate(presets):
-                preset_id = p["id"]
-                cell_base = 2 + i * 3
+                preset_id = int(p["id"])
+                cell_base = 3 + i * 2
                 trow[cell_base + 0] = per_preset_prices.get(preset_id)
 
             ws.append(trow)
             t_last = ws.max_row
 
             for i in range(len(presets)):
-                price_col = 3 + i * 3
+                price_col = 4 + i * 2
                 c_price = ws.cell(row=t_last, column=price_col)
                 c_price.alignment = price_right
                 if isinstance(c_price.value, (int, float)):
@@ -525,8 +570,9 @@ def _build_sheet_for_route(
 
     _apply_table_styles(ws, ws.max_row, ws.max_column, presets_count=len(presets))
     _apply_empty_cells_gray(ws)
+    _apply_price_alignment(ws, presets_count=len(presets))
 
-    ws.freeze_panes = "C2"
+    ws.freeze_panes = "D2"
     ws.row_dimensions[1].height = 42
     _autosize(ws)
 
@@ -553,6 +599,7 @@ def export_xlsx(db: Database) -> str:
     std_now: Dict[Tuple[int, int, int], dict] = {}
     std_prev_price: Dict[Tuple[int, int, int], float] = {}
     alt_tariffs: Dict[Tuple[int, int], Dict[str, Dict[int, float]]] = {}
+    alt_tariff_days: Dict[Tuple[int, int], Dict[str, str]] = {}
 
     def _ingest_result(row: dict) -> None:
         """Функция _ingest_result.
@@ -560,7 +607,10 @@ def export_xlsx(db: Database) -> str:
         Параметры:
             r: Описание параметра.
         """
-        key_triplet = (row["id_site"], row["id_route"], row["id_preset"])
+        site_id = int(row["id_site"]) if row.get("id_site") is not None else row["id_site"]
+        route_id = int(row["id_route"]) if row.get("id_route") is not None else row["id_route"]
+        preset_id = int(row["id_preset"]) if row.get("id_preset") is not None else row["id_preset"]
+        key_triplet = (site_id, route_id, preset_id)
         std_now[key_triplet] = {
             "price": row.get("price"),
             "days": row.get("days"),
@@ -570,14 +620,32 @@ def export_xlsx(db: Database) -> str:
 
         d = _parse_json_dict(row.get("name_tarif"))
         if d:
-            sr = (row["id_site"], row["id_route"])
+            sr = (site_id, route_id)
             bucket = alt_tariffs.setdefault(sr, {})
-            for tname, tprice in d.items():
-                if tprice is None:
+            for tname, tval in d.items():
+                if tval is None:
                     continue
-                if not isinstance(tprice, (int, float)):
+
+                # В некоторых сайтах (11, 13) name_tarif хранит список вида [price, days]
+                days_val: str | None = None
+                price_val: float | None = None
+
+                if isinstance(tval, (int, float)):
+                    price_val = float(tval)
+                elif isinstance(tval, (list, tuple)) and len(tval) >= 1 and isinstance(tval[0], (int, float)):
+                    price_val = float(tval[0])
+                    if len(tval) >= 2:
+                        days_val = _parse_days(tval[1])
+
+                if price_val is None:
                     continue
-                bucket.setdefault(str(tname), {})[row["id_preset"]] = float(tprice)
+
+                tkey = str(tname)
+                bucket.setdefault(tkey, {})[preset_id] = price_val
+
+                if days_val:
+                    # дни сохраняем на уровень (site_id, route_id, tariff_name) — для вывода в колонку B
+                    alt_tariff_days.setdefault(sr, {}).setdefault(tkey, days_val)
 
     if current_job is not None:
         for r in rows:
@@ -620,6 +688,7 @@ def export_xlsx(db: Database) -> str:
             std_now=std_now,
             std_prev_price=std_prev_price,
             alt_tariffs=alt_tariffs,
+            alt_tariff_days=alt_tariff_days,
             job_label=job_label,
         )
 

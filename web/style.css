@@ -47,6 +47,27 @@ details[open] .caret { transform: rotate(-135deg); }
 .drop-content { border-top: 1px solid var(--line); padding: 10px 12px; height: auto; }
 .list { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
 
+/*
+  Списки маршрутов и пресетов: показываем около 4 строк
+  и включаем вертикальную прокрутку.
+*/
+:root{
+  --list-row-h: 44px;   /* высота одной строки списка */
+  --list-row-gap: 8px;  /* соответствует gap у .list */
+}
+
+/* фиксируем минимальную высоту элемента, чтобы расчёт "4 строки" был стабильным */
+.list li{ min-height: var(--list-row-h); }
+
+/* ограничение высоты + прокрутка для маршрутов и пресетов */
+#routesList,
+#presetsList{
+  max-height: calc((var(--list-row-h) + var(--list-row-gap)) * 4 - var(--list-row-gap));
+  overflow-y: auto;
+  padding-right: 6px;     /* чтобы контент не налезал на скроллбар */
+  scrollbar-gutter: stable;
+}
+
 /* список: третья колонка под кнопку удаления */
 .list li {
   display: grid;
@@ -68,6 +89,15 @@ details[open] .caret { transform: rotate(-135deg); }
   background: #fff; font-weight: 800; cursor: pointer;
   line-height: 1; padding: 0 8px;
 }
+
+.edit-btn {
+  height: 28px; min-width: 28px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 8px; border: 1px solid var(--line);
+  background: #fff; font-weight: 800; cursor: pointer;
+  line-height: 1; padding: 0 8px;
+}
+.edit-btn:hover { background: #fffbe6; border-color: #ffe8a3; }
 .del-btn:hover { background: #fff0f0; border-color: #f2b5b5; }
 
 /* ==== Контролы ==== */
@@ -291,3 +321,39 @@ tr.flash { animation: flashRow .45s ease; }
 }
 .only-changes input{ width: 16px; height: 16px; }
 .only-changes:hover{ background: #fffbe6; }
+
+
+/* logs modal */
+.modal-card.modal-wide{ max-width: 1100px; }
+.logs-filters{ grid-template-columns: repeat(2, minmax(140px, 1fr)) auto; gap: 10px; align-items: end; }
+.logs-filters .muted{ align-self: end; }
+.job-badge{
+  display: inline-flex;
+  align-items: center;
+  height: var(--control-h);
+  padding: 0 12px;
+  border-radius: 12px;
+  border: 1px solid var(--line);
+  background: #fff;
+  font-weight: 800;
+  color: var(--ink);
+  box-shadow: var(--shadow-sm);
+}
+.table-logs .log-error{ max-width: 360px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+.table-logs .log-error.expanded{ white-space: normal; overflow: visible; text-overflow: unset; }
+.log-status{ display:inline-flex; align-items:center; gap:6px; padding:2px 8px; border-radius:999px; font-weight:700; font-size:12px; text-transform: lowercase; border:1px solid var(--line); background:#f2f4f8; }
+.log-status.status-ok{ background:#ecf9f0; color:#0d6b2f; border-color:#cdebd6; }
+.log-status.status-no_price{ background:#fffbe6; color:#7a5a00; border-color:#ffe8a3; }
+.log-status.status-invalid_input{ background:#fff1f0; color:#a40000; border-color:#ffd1cd; }
+.log-status.status-temporary_error{ background:#fff1f0; color:#a40000; border-color:#ffd1cd; }
+.log-status.status-error{ background:#ffe7e7; color:#a40000; border-color:#f2b5b5; }
+.log-status.status-blocked{ background:#f2f4f8; color:#444; border-color:#e7e9ee; }
+.log-status.status-disabled{ background:#f2f4f8; color:#444; border-color:#e7e9ee; }
+.log-status.status-no_adapter{ background:#f2f4f8; color:#444; border-color:#e7e9ee; }
+
+@media (max-width: 980px){
+  .logs-filters{ grid-template-columns: 1fr 1fr; }
+}
+@media (max-width: 640px){
+  .logs-filters{ grid-template-columns: 1fr; }
+}
