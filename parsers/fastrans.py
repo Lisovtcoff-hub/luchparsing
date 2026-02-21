@@ -48,9 +48,7 @@ log = logging.getLogger("parsers.fastrans")
 
 SOURCE_URL = "https://fastrans.ru/logistics/calculate/"
 
-banned = [
-    "Ижевск",
-]
+banned = []
 
 _NO_CITY_LOCK = threading.Lock()
 _NO_CITY_ROUTES: set[tuple[str, str]] = set()

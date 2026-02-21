@@ -123,7 +123,7 @@ def tkkit(
     for i in _BANNED:
         if from_city in i[0] and to_city in i[1]:
             print(f"tkkit: no terminal for route {from_city!r} -> {to_city!r} (cached)")
-            return None
+            return None, None, {}, None
 
     if _is_no_city(from_city, to_city):
         raise InvalidInputError(f"tkkit: no terminal for route {from_city!r} -> {to_city!r} (cached)")
@@ -195,14 +195,14 @@ def tkkit(
     try:
         t = json_data[0]["01"]["detail"][3]
         _BANNED.append((from_city, to_city))
-        return None
+        return None, None, {}, None
     except Exception:
         pass
     
     try:
         if json_data[0]["01"]["detail"][2]['name'] == "Льготная доставка":
             _BANNED.append((from_city, to_city))
-            return None
+            return None, None, {}, None
     except Exception:
         pass
 
@@ -246,7 +246,7 @@ def tkkit(
 
     name_tarif_json: Optional[str] = None
 
-    return float(price), days, allowances, name_tarif_json
+    return price, days, allowances, name_tarif_json
 
 
 class TkkitAdapter(CarrierAdapter):

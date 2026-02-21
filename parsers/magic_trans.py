@@ -120,14 +120,14 @@ def magic_trans_calc(
     started_ts = time.time()
     logger.info("magic-trans start", extra={"from_city": from_city, "to_city": to_city, "places": places, "weight": weight, "volume": volume, "stale_attempt": _stale_attempt})
     if _is_no_route(from_city, to_city):
-        raise InvalidInputError(f"magic-trans: no terminal for route (cached): {from_city} -> {to_city}")
+        return None, None, {}
     if _is_no_result(from_city, to_city):
-        raise InvalidInputError(f"magic-trans: no terminal for route (timeout cached): {from_city} -> {to_city}")
+        return None, None, {}
 
     from_key = _norm_city(from_city)
     to_key = _norm_city(to_city)
     if _is_non_terminal(from_key) or _is_non_terminal(to_key):
-        raise InvalidInputError(f"magic-trans: город без терминала (cached): {from_city} -> {to_city}")
+        return None, None, {}
         logger.info(
             "magic-trans: skipped by cache",
             extra={"from_city": from_city, "to_city": to_city, "cache_size": len(_NON_TERMINAL_CITIES)},
@@ -456,7 +456,7 @@ def magic_trans_calc(
         logger.info("magic-trans terminal state", extra={"from_city": from_city, "to_city": to_city, "state": info})
         if _terminal_state_ready(info) and info.get("anyNonTerminal"):
             _remember_non_terminal_cities(info)
-            raise InvalidInputError(f"magic-trans: город без терминала: {from_city} -> {to_city}")
+            return None, None, {}
         if not _terminal_state_ready(info):
             logger.warning(
                 "magic-trans: terminal state not ready",
@@ -608,7 +608,7 @@ def magic_trans_calc(
         logger.info("magic-trans terminal state after calc", extra={"from_city": from_city, "to_city": to_city, "state": info_after})
         if _terminal_state_ready(info_after) and info_after.get("anyNonTerminal"):
             _remember_non_terminal_cities(info_after)
-            raise InvalidInputError(f"magic-trans: город без терминала: {from_city} -> {to_city}")
+            return None, None, {}
         if _terminal_state_ready(info_after):
             logger.info(
                 "magic-trans: terminal state after calc",
