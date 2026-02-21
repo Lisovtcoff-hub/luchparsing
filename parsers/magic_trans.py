@@ -11,6 +11,7 @@ import time
 import os
 import logging
 import threading
+import asyncio
 from typing import Dict, Optional
 
 from selenium import webdriver
@@ -33,6 +34,10 @@ _NO_ROUTE_ROUTES: set[tuple[str, str]] = set()
 _NO_RESULT_LOCK = threading.Lock()
 _NO_RESULT_ROUTES: set[tuple[str, str]] = set()
 MAGIC_TRANS_STALE_RETRIES = int(os.getenv("MAGIC_TRANS_STALE_RETRIES", "3") or 3)
+MAGIC_TRANS_MAX_BROWSERS = int(os.getenv("MAGIC_TRANS_MAX_BROWSERS", "1") or 1)
+MAGIC_TRANS_DRIVER_RETRIES = int(os.getenv("MAGIC_TRANS_DRIVER_RETRIES", "2") or 2)
+MAGIC_TRANS_DRIVER_RETRY_SLEEP = float(os.getenv("MAGIC_TRANS_DRIVER_RETRY_SLEEP", "1.5") or 1.5)
+MAGIC_TRANS_SEMAPHORE = asyncio.Semaphore(max(1, MAGIC_TRANS_MAX_BROWSERS))
 
 
 
@@ -109,6 +114,7 @@ def magic_trans_calc(
     dims: dict,
     show_browser: bool = False,
     _stale_attempt: int = 0,
+    driver: webdriver.Chrome | None = None,
 ) -> tuple[Optional[float], Optional[int], Dict[str, float]]:
     """Возвращает (price, days, allowances)."""
     started_ts = time.time()
@@ -150,10 +156,22 @@ def magic_trans_calc(
     }
     chrome_options.add_experimental_option("prefs", prefs)
 
-    driver = webdriver.Chrome(
-        service=Service(executable_path=os.getenv("CHROMEDRIVER", "/usr/bin/chromedriver")),
-        options=chrome_options,
-    )
+    def _make_driver():
+        last_err: Exception | None = None
+        for attempt in range(1, MAGIC_TRANS_DRIVER_RETRIES + 1):
+            try:
+                raise TemporaryError("magic-trans: driver must be provided by pool")
+            except Exception as e:
+                last_err = e
+                logger.warning(
+                    "magic-trans webdriver init failed",
+                    extra={"attempt": attempt, "max": MAGIC_TRANS_DRIVER_RETRIES, "err": str(e)},
+                )
+                time.sleep(MAGIC_TRANS_DRIVER_RETRY_SLEEP * attempt)
+        raise TemporaryError("magic-trans: webdriver init failed") from last_err
+
+    if driver is None:
+        raise TemporaryError("magic-trans: driver is required")
     driver.set_page_load_timeout(20)
     wait = WebDriverWait(driver, 15, poll_frequency=0.2)
 
@@ -710,14 +728,12 @@ def magic_trans_calc(
                 dims,
                 show_browser=show_browser,
                 _stale_attempt=_stale_attempt + 1,
+                driver=driver,
             )
         raise TemporaryError("magic-trans: stale element reference") from e
 
     finally:
-        try:
-            driver.quit()
-        except Exception:
-            pass
+        pass
 
 class MagicTransAdapter(SyncSeleniumAdapter):
     """Класс MagicTransAdapter.
@@ -727,8 +743,9 @@ class MagicTransAdapter(SyncSeleniumAdapter):
     code = "magic-trans"
     TIMEOUT = 80.0
     HEADLESS = True
+    SEMAPHORE = MAGIC_TRANS_SEMAPHORE
 
-    def _calc_sync(self, p: CalcParams) -> CalcResult:
+    def _calc_sync(self, p: CalcParams, driver: webdriver.Chrome) -> CalcResult:
         """Функция _calc_sync.
 
         Параметры:
@@ -747,6 +764,7 @@ class MagicTransAdapter(SyncSeleniumAdapter):
                 round(float(p.volume_m3), 3),
                 dims,
                 show_browser=False,
+                driver=driver,
             )
         except InvalidInputError:
             raise

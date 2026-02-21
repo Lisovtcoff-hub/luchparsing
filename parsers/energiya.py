@@ -6,9 +6,11 @@
 from __future__ import annotations
 
 import os
+import re
 import asyncio
 import json
 import threading
+import random
 import time
 from typing import Any, Dict, Optional, Tuple
 
@@ -117,10 +119,73 @@ ENERGIYA_READ_TIMEOUT_S = float(os.getenv("ENERGIYA_READ_TIMEOUT_S", "60") or 60
 _CITIES_LOCK = threading.Lock()
 _CITIES_CACHE_AT: float = 0.0
 _CITIES_CACHE: Dict[str, int] = {}
+_CITIES_CACHE_PATH = os.getenv("ENERGIYA_CITIES_CACHE_PATH", "/app/exports/energiya_cities.json")
 
+# route-level timeout ban for current run
+_NO_ROUTE_ROUTES: set[tuple[str, str]] = set()
+_ROUTE_TIMEOUTS: dict[tuple[str, str], int] = {}
+
+
+def _route_key(from_city: str, to_city: str) -> tuple[str, str]:
+    return (from_city or "").strip().lower(), (to_city or "").strip().lower()
+
+
+def _is_no_route(from_city: str, to_city: str) -> bool:
+    return _route_key(from_city, to_city) in _NO_ROUTE_ROUTES
+
+
+def _remember_no_route(from_city: str, to_city: str) -> None:
+    _NO_ROUTE_ROUTES.add(_route_key(from_city, to_city))
+
+
+def _bump_route_timeout(from_city: str, to_city: str) -> int:
+    key = _route_key(from_city, to_city)
+    cnt = _ROUTE_TIMEOUTS.get(key, 0) + 1
+    _ROUTE_TIMEOUTS[key] = cnt
+    return cnt
+
+
+def _load_cities_cache_from_disk() -> None:
+    global _CITIES_CACHE_AT
+    path = _CITIES_CACHE_PATH
+    if not path:
+        return
+    try:
+        if not os.path.exists(path):
+            return
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            mapping = data.get("mapping") if "mapping" in data else data
+            ts = data.get("ts")
+            if isinstance(mapping, dict) and mapping:
+                _CITIES_CACHE.clear()
+                _CITIES_CACHE.update({str(k): int(v) for k, v in mapping.items()})
+                _CITIES_CACHE_AT = float(ts) if ts else time.time()
+    except Exception:
+        # ignore cache load errors
+        return
+
+
+def _save_cities_cache_to_disk(mapping: Dict[str, int]) -> None:
+    path = _CITIES_CACHE_PATH
+    if not path:
+        return
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"ts": time.time(), "mapping": mapping}, f, ensure_ascii=False)
+    except Exception:
+        # ignore cache save errors
+        return
+
+
+_NO_PICK_RE = re.compile(r"\s+не\s+выбирать\b.*$", re.IGNORECASE)
 
 def _norm_city(name: str) -> str:
-    return " ".join((name or "").strip().lower().split())
+    s = " ".join((name or "").strip().lower().split())
+    s = _NO_PICK_RE.sub("", s)
+    return s.strip(" ,.!?;:-")
 
 
 def find_city(name: str) -> Optional[int]:
@@ -137,16 +202,43 @@ def find_city(name: str) -> Optional[int]:
     now = time.time()
 
     with _CITIES_LOCK:
-        if _CITIES_CACHE and (now - _CITIES_CACHE_AT) < ENERGIYA_CITIES_TTL_S:
-            return _CITIES_CACHE.get(key)
+        if not _CITIES_CACHE:
+            _load_cities_cache_from_disk()
 
-    resp = requests.get(
-        url=f"{BASE}v3/cities",
-        headers=HEADERS,
-        timeout=(ENERGIYA_CONNECT_TIMEOUT_S, ENERGIYA_READ_TIMEOUT_S),
-    )
-    resp.raise_for_status()
-    json_data = resp.json() or {}
+        if _CITIES_CACHE and (now - _CITIES_CACHE_AT) < ENERGIYA_CITIES_TTL_S:
+            hit = _CITIES_CACHE.get(key)
+            if hit is not None:
+                return hit
+
+    max_attempts = int(os.getenv("ENERGIYA_CITIES_MAX_RETRIES", "3") or 3)
+    base_delay = float(os.getenv("ENERGIYA_CITIES_BACKOFF_BASE_S", "0.7") or 0.7)
+    max_delay = float(os.getenv("ENERGIYA_CITIES_BACKOFF_MAX_S", "6.0") or 6.0)
+    last_exc: Exception | None = None
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            resp = requests.get(
+                url=f"{BASE}v3/cities",
+                headers=HEADERS,
+                timeout=(ENERGIYA_CONNECT_TIMEOUT_S, ENERGIYA_READ_TIMEOUT_S),
+            )
+            resp.raise_for_status()
+            json_data = resp.json() or {}
+            break
+        except (requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
+            last_exc = e
+            if attempt >= max_attempts:
+                # fall back to cache if present
+                with _CITIES_LOCK:
+                    if _CITIES_CACHE:
+                        return _CITIES_CACHE.get(key)
+                raise
+            delay = min(max_delay, base_delay * (2 ** (attempt - 1)))
+            jitter = random.uniform(0, delay * 0.35)
+            time.sleep(delay + jitter)
+            continue
+    else:
+        raise last_exc or RuntimeError("energiya: cities request failed")
 
     mapping: Dict[str, int] = {}
     for city in (json_data.get("cityList") or []):
@@ -163,8 +255,10 @@ def find_city(name: str) -> Optional[int]:
         _CITIES_CACHE.clear()
         _CITIES_CACHE.update(mapping)
         _CITIES_CACHE_AT = time.time()
+        _save_cities_cache_to_disk(_CITIES_CACHE)
 
     return _CITIES_CACHE.get(key)
+    
 
 
 def energiya(
@@ -188,6 +282,9 @@ def energiya(
     Возвращает:
         Результат выполнения функции.
     """
+    if _is_no_route(from_city, to_city):
+        raise InvalidInputError(f"energiya: no terminal for route (cached): {from_city} -> {to_city}")
+
     id_city_from = find_city(from_city)
     id_city_to = find_city(to_city)
 
@@ -222,7 +319,10 @@ def energiya(
     }
 
     last_exc: Exception | None = None
-    for attempt in range(1, 4):
+    max_attempts = int(os.getenv("ENERGIYA_MAX_RETRIES", "3") or 3)
+    base_delay = float(os.getenv("ENERGIYA_BACKOFF_BASE_S", "0.7") or 0.7)
+    max_delay = float(os.getenv("ENERGIYA_BACKOFF_MAX_S", "6.0") or 6.0)
+    for attempt in range(1, max_attempts + 1):
         try:
             resp = requests.post(
                 f"{BASE}v3/price",
@@ -235,9 +335,19 @@ def energiya(
             break
         except (requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
             last_exc = e
-            if attempt >= 3:
+            if isinstance(e, requests.exceptions.ConnectTimeout):
+                cnt = _bump_route_timeout(from_city, to_city)
+                if cnt >= 2:
+                    _remember_no_route(from_city, to_city)
+                    raise InvalidInputError(
+                        f"energiya: no terminal for route (connect timeout x{cnt}): {from_city} -> {to_city}"
+                    ) from e
+            if attempt >= max_attempts:
                 raise
-            time.sleep(0.7 * attempt)
+            # exponential backoff + jitter
+            delay = min(max_delay, base_delay * (2 ** (attempt - 1)))
+            jitter = random.uniform(0, delay * 0.35)
+            time.sleep(delay + jitter)
             continue
     else:
         # should never happen

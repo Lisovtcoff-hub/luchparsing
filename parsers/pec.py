@@ -111,6 +111,7 @@ CALC_URL = "https://calc.pecom.ru/bitrix/components/pecom/calc/ajax.php"
 _TOWNS_CACHE: Optional[Dict[str, Dict[str, str]]] = None
 _NO_CITY_LOCK = threading.Lock()
 _NO_CITY_ROUTES: set[tuple[str, str]] = set()
+_BANNED = ["Благовещенск"]
 
 
 def _route_key(from_city: str, to_city: str) -> tuple[str, str]:
@@ -156,6 +157,8 @@ def _norm(s: str) -> str:
 
 def find_city(name: str) -> Optional[str]:
     """Возвращает ID города ПЭК. Мягкий матчинг по названию."""
+    if name in _BANNED:
+        return None
     data = _load_towns()
     target = _norm(name)
     if not target:

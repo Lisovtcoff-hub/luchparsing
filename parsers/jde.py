@@ -37,7 +37,7 @@ def _load_city_ids() -> dict:
     return _CITY_ID_CACHE
 
 
-def jde_calc(from_city: str, to_city: str, places: int, weight: int, volume: float) -> Tuple[Optional[int], Optional[str], Dict[str, float]]:
+def jde_calc(from_city: str, to_city: str, places: int, weight: int, volume: float, driver: webdriver.Chrome) -> Tuple[Optional[int], Optional[str], Dict[str, float]]:
     """
     Возвращает (итоговая_цена_руб, срок_текстом, надбавки).
     """
@@ -67,10 +67,8 @@ def jde_calc(from_city: str, to_city: str, places: int, weight: int, volume: flo
     }
     chrome_options.add_experimental_option("prefs", prefs)
 
-    driver = webdriver.Chrome(
-        service=Service(executable_path=os.getenv("CHROMEDRIVER", "/usr/bin/chromedriver")),
-        options=chrome_options,
-    )
+    if driver is None:
+        raise TemporaryError("jde: driver is required")
 
     wait = WebDriverWait(driver, 20, poll_frequency=0.2)
 
@@ -332,7 +330,7 @@ def jde_calc(from_city: str, to_city: str, places: int, weight: int, volume: flo
         return total_price, time_text, fees
 
     finally:
-        driver.quit()
+        pass
 
 
 class JdeAdapter(SyncSeleniumAdapter):
@@ -344,7 +342,7 @@ class JdeAdapter(SyncSeleniumAdapter):
     TIMEOUT = 120.0
     HEADLESS = True
 
-    def _calc_sync(self, p: CalcParams) -> CalcResult:
+    def _calc_sync(self, p: CalcParams, driver: webdriver.Chrome) -> CalcResult:
         """Функция _calc_sync.
 
         Параметры:
@@ -360,6 +358,7 @@ class JdeAdapter(SyncSeleniumAdapter):
                 int(p.places),
                 int(round(p.weight_kg)),
                 float(p.volume_m3),
+                driver=driver,
             )
         except ValueError as e:
             raise InvalidInputError(str(e)) from e

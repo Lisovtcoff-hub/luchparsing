@@ -108,6 +108,29 @@ def best_dimensions_cm(total_m3: float, places: int,
 
 banned = ["Октябрьский", ]
 
+# route-level caches for current run
+_NO_ROUTE_ROUTES: set[tuple[str, str]] = set()
+_TIMEOUT_ROUTE_COUNTS: dict[tuple[str, str], int] = {}
+
+
+def _route_key(from_city: str, to_city: str) -> tuple[str, str]:
+    return (from_city or "").strip().lower(), (to_city or "").strip().lower()
+
+
+def _is_no_route(from_city: str, to_city: str) -> bool:
+    return _route_key(from_city, to_city) in _NO_ROUTE_ROUTES
+
+
+def _remember_no_route(from_city: str, to_city: str) -> None:
+    _NO_ROUTE_ROUTES.add(_route_key(from_city, to_city))
+
+
+def _bump_timeout(from_city: str, to_city: str) -> int:
+    key = _route_key(from_city, to_city)
+    cnt = _TIMEOUT_ROUTE_COUNTS.get(key, 0) + 1
+    _TIMEOUT_ROUTE_COUNTS[key] = cnt
+    return cnt
+
 log = logging.getLogger("parsers.dpd")
 
 URL = "https://dpd.ru/calc"
@@ -152,7 +175,7 @@ def build_driver() -> webdriver.Chrome:
     chromedriver_path = os.getenv("CHROMEDRIVER", "/usr/bin/chromedriver")
     service = Service(chromedriver_path)
 
-    driver = webdriver.Chrome(service=service, options=opts)
+    raise TemporaryError("dpd: driver must be provided by pool")
 
     # Таймауты в Docker лучше держать больше(((
     driver.set_page_load_timeout(30)
@@ -303,11 +326,13 @@ def dpd_calc(
     places: int,
     weight_kg: float,
     volume_m3: float,
+    driver: webdriver.Chrome,
 ) -> tuple[Optional[float], Optional[str], dict]:
     if to_city in banned or from_city in banned:
         return None, None, {}
     request_id = uuid.uuid4().hex[:10]
-    driver = build_driver()
+    if driver is None:
+        raise TemporaryError("dpd: driver is required")
 
     # основной wait для формы
     wait = WebDriverWait(driver, 20, 0.1)
@@ -368,8 +393,7 @@ def dpd_calc(
         raise TemporaryError("dpd: webdriver error") from e
 
     finally:
-        with suppress(Exception):
-            driver.quit()
+        pass
 
 
 class DpdAdapter(SyncSeleniumAdapter):
@@ -377,18 +401,29 @@ class DpdAdapter(SyncSeleniumAdapter):
     TIMEOUT = 120.0
     HEADLESS = True
 
-    def _calc_sync(self, p: CalcParams) -> CalcResult:
+    def _calc_sync(self, p: CalcParams, driver: webdriver.Chrome) -> CalcResult:
+        if _is_no_route(p.from_city, p.to_city):
+            raise InvalidInputError(f"dpd: no terminal for route (cached): {p.from_city} -> {p.to_city}")
         try:
             price, days, results = dpd_calc(
                 p.from_city,
                 p.to_city,
                 int(p.places),
                 float(p.weight_kg),
-                round(float(p.volume_m3), 3)
+                round(float(p.volume_m3), 3),
+                driver=driver,
             )
         except ValueError as e:
             raise InvalidInputError(str(e)) from e
-        except TemporaryError:
+        except TemporaryError as e:
+            msg = str(e)
+            if "dpd: timeout while waiting for page elements/result" in msg:
+                cnt = _bump_timeout(p.from_city, p.to_city)
+                if cnt >= 2:
+                    _remember_no_route(p.from_city, p.to_city)
+                    raise InvalidInputError(
+                        f"dpd: no terminal for route (timeout x{cnt}): {p.from_city} -> {p.to_city}"
+                    ) from e
             raise
         except Exception as e:
             log.exception("dpd unexpected error: %s", e)

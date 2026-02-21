@@ -68,10 +68,7 @@ def _make_driver(show_browser: bool = False):
     if chrome_bin:
         opts.binary_location = chrome_bin
 
-    return webdriver.Chrome(
-        service=Service(executable_path=os.getenv("CHROMEDRIVER", "/usr/bin/chromedriver")),
-        options=opts,
-    )
+    raise TemporaryError("baykal: driver must be provided by pool")
 
 
 def baykal_calc(
@@ -80,6 +77,7 @@ def baykal_calc(
     places: int,
     weight: int,
     volume: float,
+    driver: webdriver.Chrome,
 ) -> Tuple[Optional[float], Optional[str], Dict[str, float]]:
     """Функция baykal_calc.
 
@@ -93,7 +91,8 @@ def baykal_calc(
     Возвращает:
         Результат выполнения функции.
     """
-    driver = _make_driver(show_browser=False)
+    if driver is None:
+        raise TemporaryError("baykal: driver is required")
     wait = WebDriverWait(driver, 20)
 
     def rub_to_float(s: str) -> float:
@@ -230,10 +229,7 @@ def baykal_calc(
         return price, days, allowances
 
     finally:
-        try:
-            driver.quit()
-        except Exception:
-            pass
+        pass
 
 
 class BaykalAdapter(SyncSeleniumAdapter):
@@ -246,7 +242,7 @@ class BaykalAdapter(SyncSeleniumAdapter):
     TIMEOUT = 80.0
     HEADLESS = True
 
-    def _calc_sync(self, p: CalcParams) -> CalcResult:
+    def _calc_sync(self, p: CalcParams, driver: webdriver.Chrome) -> CalcResult:
         """Функция _calc_sync.
 
         Параметры:
@@ -265,6 +261,7 @@ class BaykalAdapter(SyncSeleniumAdapter):
                 int(p.places),
                 int(round(p.weight_kg)),
                 float(p.volume_m3),
+                driver=driver,
             )
         except ValueError as e:
             raise InvalidInputError(str(e)) from e

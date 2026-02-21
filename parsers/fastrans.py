@@ -413,7 +413,7 @@ def _build_driver(request_id: str, show_browser: bool) -> webdriver.Chrome:
     else:
         raise TemporaryError("fastrans: chromedriver not found and webdriver_manager disabled")
 
-    return webdriver.Chrome(service=service, options=opts)
+    raise TemporaryError("fastrans: driver must be provided by pool")
 
 
 def fastrans(
@@ -423,6 +423,7 @@ def fastrans(
     weight: int,
     volume: float,
     show_browser: bool = False,
+    driver: webdriver.Chrome | None = None,
 ) -> Tuple[Optional[int], Optional[int], Optional[int]]:
     request_id = uuid.uuid4().hex[:12]
 
@@ -438,9 +439,10 @@ def fastrans(
         log.warning("fastrans banned route request_id=%s from=%r to=%r", request_id, from_city, to_city)
         raise InvalidInputError(f"fastrans: banned route {from_city!r} -> {to_city!r}")
 
-    driver: Optional[webdriver.Chrome] = None
+    driver: Optional[webdriver.Chrome] = driver
+    if driver is None:
+        raise TemporaryError("fastrans: driver is required")
     try:
-        driver = _build_driver(request_id, show_browser=show_browser)
         wait = WebDriverWait(driver, 30, poll_frequency=0.2)
 
         driver.get(SOURCE_URL)
@@ -603,11 +605,7 @@ def fastrans(
             if show_browser:
                 time.sleep(2)
         finally:
-            try:
-                if driver:
-                    driver.quit()
-            except Exception:
-                pass
+            pass
 
 
 class FastransAdapter(SyncSeleniumAdapter):
@@ -616,7 +614,7 @@ class FastransAdapter(SyncSeleniumAdapter):
     TIMEOUT = 90.0
     HEADLESS = True
 
-    def _calc_sync(self, p: CalcParams) -> CalcResult:
+    def _calc_sync(self, p: CalcParams, driver: webdriver.Chrome) -> CalcResult:
         try:
             res = fastrans(
                 p.from_city,
@@ -625,6 +623,7 @@ class FastransAdapter(SyncSeleniumAdapter):
                 int(round(p.weight_kg)),
                 float(p.volume_m3),
                 show_browser=False,
+                driver=driver,
             )
         except InvalidInputError:
             raise

@@ -195,12 +195,11 @@ class Outcome:
     days: str | None
     name_tarif: str | None
     allowances_json: str | None
-    context_json: str | None
-
     created_ts: float
 
     status: str  # ok | no_price | invalid_input | temporary_error | error | blocked | disabled | no_adapter
     error: str | None
+    context_json: str | None = None
 
 
 async def _calc_with_retry(adapter: CarrierAdapter, client: httpx.AsyncClient, params: CalcParams) -> CalcResult:
@@ -593,6 +592,7 @@ async def run_orchestrator(
                 days=days,
                 name_tarif=name_tarif,
                 allowances_json=allowances_json,
+                context_json=context_json,
                 created_ts=created_ts,
                 status=status,
                 error=err,
@@ -639,6 +639,7 @@ async def run_orchestrator(
                             days=None,
                             name_tarif=None,
                             allowances_json=None,
+                            context_json=_context_json(item.params),
                             created_ts=time.time(),
                             status="error",
                             error=msg,
@@ -675,7 +676,7 @@ async def run_orchestrator(
                             out.allowances_json,
                             out.status,
                             out.error,
-                        out.context_json,
+                            out.context_json,
                         )
                     )
                     key = (out.site_id, out.route_id, out.preset_id)
@@ -697,6 +698,17 @@ async def run_orchestrator(
                     if now - last_progress_push >= 0.5 or done_unique >= total:
                         db.set_job_status(job_id, "running", progress=round(done_unique / total * 100.0, 2))
                         last_progress_push = now
+                        if done_unique >= total and finished_workers < workers:
+                            logger.warning(
+                                "progress 100 but workers still running "
+                                + kv(
+                                    job_id=job_id,
+                                    done=done_unique,
+                                    total=total,
+                                    finished=finished_workers,
+                                    workers=workers,
+                                )
+                            )
 
                 if cancel_event.is_set():
                     # мягко выходим; оставшиеся воркеры тоже должны выйти
@@ -713,6 +725,7 @@ async def run_orchestrator(
                 await asyncio.sleep(0.4)
                 if db.is_job_cancelled(job_id):
                     cancel_event.set()
+                    logger.warning("cancel requested " + kv(job_id=job_id))
                     return
 
         # run pipeline
@@ -864,6 +877,7 @@ async def run_orchestrator(
                                     days=None,
                                     name_tarif=None,
                                     allowances_json=None,
+                                    context_json=_context_json(wi.params),
                                     created_ts=time.time(),
                                     status="error",
                                     error=msg,

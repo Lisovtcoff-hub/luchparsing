@@ -7,9 +7,11 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
+import time
 from contextlib import contextmanager
-from typing import Optional, Tuple
+from typing import Iterable, Optional, Tuple
 
 from core.contracts import CarrierAdapter, CalcParams, CalcResult, InvalidInputError, TemporaryError
 
@@ -25,6 +27,9 @@ from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.remote.webdriver import WebDriver
+
+from core.driver_pool import DriverPool
 
 try:
     from webdriver_manager.chrome import ChromeDriverManager
@@ -35,8 +40,9 @@ except Exception:
 DEFAULT_TIMEOUT_SECONDS = 60.0
 DEFAULT_SELENIUM_WAIT_SECONDS = 20.0
 DEFAULT_MAX_BROWSERS = 2
+DEFAULT_POOL_RECYCLE_EVERY = 30
 
-SELENIUM_SEMAPHORE = asyncio.Semaphore(DEFAULT_MAX_BROWSERS)
+logger = logging.getLogger(__name__)
 
 
 def _chrome_options(headless: bool = True) -> webdriver.ChromeOptions:
@@ -52,7 +58,8 @@ def _chrome_options(headless: bool = True) -> webdriver.ChromeOptions:
     if headless:
         opts.add_argument("--headless=new")
     opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-dev-shm-usage")
+    if os.getenv("CHROME_DISABLE_DEV_SHM", "0").strip() in {"1", "true", "True", "yes", "YES"}:
+        opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1920,1080")
     opts.add_argument("--disable-gpu")
     opts.add_argument("--disable-infobars")
@@ -62,6 +69,15 @@ def _chrome_options(headless: bool = True) -> webdriver.ChromeOptions:
     if ua:
         opts.add_argument(f"--user-agent={ua}")
     return opts
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name, "").strip()
+    try:
+        value = int(raw)
+        return value if value > 0 else default
+    except Exception:
+        return default
 
 
 def _resolve_chromedriver_service() -> ChromeService:
@@ -152,6 +168,65 @@ class SyncSeleniumAdapter(CarrierAdapter):
     TIMEOUT: float = DEFAULT_TIMEOUT_SECONDS
     HEADLESS: bool = True
     SEMAPHORE: Optional[asyncio.Semaphore] = None
+    _POOL: DriverPool | None = None
+    _POOL_LOCK: asyncio.Lock | None = None
+
+    async def _get_pool(self) -> DriverPool:
+        cls = self.__class__
+        pool = getattr(cls, "_POOL", None)
+        if pool is not None:
+            return pool
+
+        if getattr(cls, "_POOL_LOCK", None) is None:
+            cls._POOL_LOCK = asyncio.Lock()
+
+        async with cls._POOL_LOCK:
+            pool = getattr(cls, "_POOL", None)
+            if pool is not None:
+                return pool
+
+            pool_size = _env_int("SELENIUM_POOL_SIZE", DEFAULT_MAX_BROWSERS)
+            recycle_every = _env_int("SELENIUM_RECYCLE_EVERY", DEFAULT_POOL_RECYCLE_EVERY)
+
+            def _factory() -> WebDriver:
+                delays = (0.5, 1.0, 2.0)
+                last_err: Exception | None = None
+                for attempt, delay_s in enumerate(delays, start=1):
+                    try:
+                        driver = webdriver.Chrome(
+                            service=_resolve_chromedriver_service(),
+                            options=_chrome_options(headless=self.HEADLESS),
+                        )
+                        try:
+                            driver.set_page_load_timeout(float(self.TIMEOUT))
+                            driver.set_script_timeout(float(self.TIMEOUT))
+                        except Exception:
+                            pass
+                        return driver
+                    except Exception as e:
+                        last_err = e
+                        logger.warning(
+                            "selenium driver start failed code=%s attempt=%s/%s err=%s",
+                            getattr(self, "code", self.__class__.__name__),
+                            attempt,
+                            len(delays),
+                            type(e).__name__,
+                            exc_info=True,
+                        )
+                        time.sleep(delay_s)
+                if last_err is not None:
+                    raise last_err
+                raise RuntimeError("selenium driver start failed: unknown error")
+
+            pool = DriverPool(size=pool_size, driver_factory=_factory, recycle_every=recycle_every)
+            cls._POOL = pool
+            logger.info(
+                "selenium pool init code=%s size=%s recycle_every=%s",
+                getattr(self, "code", self.__class__.__name__),
+                pool_size,
+                recycle_every,
+            )
+            return pool
 
     async def calc(self, client, p: CalcParams) -> CalcResult:
         """Запускает синхронный Selenium в пуле потоков с контролем параллелизма.
@@ -159,20 +234,36 @@ class SyncSeleniumAdapter(CarrierAdapter):
         Важный нюанс: asyncio.wait_for НЕ умеет «убивать» поток.
         Поэтому таймауты реализованы так, чтобы:
         - при истечении TIMEOUT мы отдавали TemporaryError;
-        - но semaphore НЕ отпускался, пока поток реально не завершится
+        - но driver НЕ отпускался, пока поток реально не завершится
           (иначе получаем «фантомные» браузеры и лавину параллельности).
         """
-        sem = self.SEMAPHORE or SELENIUM_SEMAPHORE
+        pool = await self._get_pool()
+        driver = await pool.acquire()
+        logger.debug(
+            "selenium acquire code=%s driver=%s",
+            getattr(self, "code", self.__class__.__name__),
+            id(driver),
+        )
 
-        await sem.acquire()
-        task = asyncio.create_task(asyncio.to_thread(self._run_sync_with_mapped_errors, p))
+        timeout_flag = {"broken": False}
+        task = asyncio.create_task(asyncio.to_thread(self._run_sync_with_mapped_errors, p, driver))
 
         def _release(_t: asyncio.Task) -> None:
+            broken = timeout_flag["broken"]
+            exc = None
             try:
-                sem.release()
-            except ValueError:
-                # на всякий случай: если release() вызван лишний раз
-                pass
+                exc = _t.exception()
+            except asyncio.CancelledError:
+                exc = None
+            if isinstance(exc, _DriverBrokenError):
+                broken = True
+            pool.release(driver, broken=broken)
+            logger.debug(
+                "selenium release code=%s driver=%s broken=%s",
+                getattr(self, "code", self.__class__.__name__),
+                id(driver),
+                broken,
+            )
 
         task.add_done_callback(_release)
 
@@ -180,17 +271,18 @@ class SyncSeleniumAdapter(CarrierAdapter):
             # shield: чтобы timeout/cancel не отменял task (и не отпускал семафор преждевременно)
             return await asyncio.wait_for(asyncio.shield(task), timeout=self.TIMEOUT)
         except asyncio.TimeoutError as e:
-            raise TemporaryError(f"{self.code}: timeout {self.TIMEOUT:.0f}s") from e
+            timeout_flag["broken"] = True
+            raise TemporaryError(f"calc timeout: {self.TIMEOUT:.0f}s (driver recycled)") from e
 
 
-    def _calc_sync(self, p: CalcParams) -> CalcResult:
+    def _calc_sync(self, p: CalcParams, driver: WebDriver) -> CalcResult:
         """Синхронная реализация расчёта (реализуется в наследнике)."""
         raise NotImplementedError
 
-    def _run_sync_with_mapped_errors(self, p: CalcParams) -> CalcResult:
+    def _run_sync_with_mapped_errors(self, p: CalcParams, driver: WebDriver) -> CalcResult:
         """Оборачивает типовые Selenium-ошибки в TemporaryError/InvalidInputError."""
         try:
-            return self._calc_sync(p)
+            return self._calc_sync(p, driver)
         except InvalidInputError:
             raise
         except TimeoutException as e:
@@ -200,7 +292,7 @@ class SyncSeleniumAdapter(CarrierAdapter):
         except (StaleElementReferenceException, ElementClickInterceptedException) as e:
             raise TemporaryError(f"{self.code}: transient dom state") from e
         except WebDriverException as e:
-            raise TemporaryError(f"{self.code}: webdriver error") from e
+            raise _DriverBrokenError(f"{self.code}: webdriver error") from e
         except TemporaryError:
             raise
         except Exception as e:
@@ -219,6 +311,7 @@ class SyncSeleniumAdapter(CarrierAdapter):
             yield drv
 
 
+
     @staticmethod
     def by_css(css: str) -> Tuple[str, str]:
         """Удобный конструктор локатора CSS."""
@@ -228,3 +321,31 @@ class SyncSeleniumAdapter(CarrierAdapter):
     def by_xpath(xpath: str) -> Tuple[str, str]:
         """Удобный конструктор локатора XPath."""
         return (By.XPATH, xpath)
+
+class _DriverBrokenError(TemporaryError):
+    """?????????? ??????: ?????? ????????, ??????? broken=True ??? release()."""
+
+
+async def close_adapter_pools(adapters: Iterable[CarrierAdapter]) -> None:
+    pools: list[DriverPool] = []
+    seen: set[int] = set()
+    for adapter in adapters:
+        pool = getattr(adapter.__class__, "_POOL", None)
+        if pool is None:
+            continue
+        pool_id = id(pool)
+        if pool_id in seen:
+            continue
+        seen.add(pool_id)
+        pools.append(pool)
+        adapter.__class__._POOL = None
+
+    if not pools:
+        return
+
+    logger.info("selenium pool close: count=%s", len(pools))
+    results = await asyncio.gather(*(p.close() for p in pools), return_exceptions=True)
+    for i, res in enumerate(results):
+        if isinstance(res, Exception):
+            logger.exception("selenium pool close failed idx=%s err=%s", i, type(res).__name__)
+

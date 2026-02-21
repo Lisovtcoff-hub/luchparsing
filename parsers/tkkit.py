@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 _CITY_CODE_CACHE: Dict[str, str] = {}
 _NO_CITY_LOCK = threading.Lock()
 _NO_CITY_ROUTES: set[tuple[str, str]] = set()
+_BANNED = []
 
 
 def _route_key(from_city: str, to_city: str) -> tuple[str, str]:
@@ -119,6 +120,11 @@ def tkkit(
     Возвращает:
         Результат выполнения функции.
     """
+    for i in _BANNED:
+        if from_city in i[0] and to_city in i[1]:
+            print(f"tkkit: no terminal for route {from_city!r} -> {to_city!r} (cached)")
+            return None
+
     if _is_no_city(from_city, to_city):
         raise InvalidInputError(f"tkkit: no terminal for route {from_city!r} -> {to_city!r} (cached)")
 
@@ -185,6 +191,20 @@ def tkkit(
     price_raw = None
     days_raw = None
     insurance_raw = None
+
+    try:
+        t = json_data[0]["01"]["detail"][3]
+        _BANNED.append((from_city, to_city))
+        return None
+    except Exception:
+        pass
+    
+    try:
+        if json_data[0]["01"]["detail"][2]['name'] == "Льготная доставка":
+            _BANNED.append((from_city, to_city))
+            return None
+    except Exception:
+        pass
 
     try:
         price_raw = json_data[0]["01"]["detail"][0]["price"]

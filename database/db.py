@@ -156,6 +156,19 @@ class Database:
             self.seed_sites_config_defaults()
             self.conn.commit()
 
+    def ensure_results_context(self) -> bool:
+        """Гарантирует наличие колонки results.context_json.
+
+        Возвращает True, если колонка добавлена в этом вызове.
+        """
+        with self.lock:
+            rcols = [r["name"] for r in self.conn.execute("PRAGMA table_info(results)").fetchall()]
+            if "context_json" in rcols:
+                return False
+            self.conn.execute("ALTER TABLE results ADD COLUMN context_json TEXT")
+            self.conn.commit()
+            return True
+
     def list_sites(self) -> list[dict]:
         """Возвращает список перевозчиков/источников (sites)."""
         with self.lock:

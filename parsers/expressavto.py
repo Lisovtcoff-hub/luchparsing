@@ -106,7 +106,7 @@ def _wait_stable_total(
     raise TimeoutException("calc_total did not become numeric in time")
 
 
-def expressavto(from_city: str, to_city: str, places: int, weight: int, volume: float) -> int:
+def expressavto(from_city: str, to_city: str, places: int, weight: int, volume: float, driver: webdriver.Chrome) -> int:
     try:
         from_value = CITY_TO_VALUE[from_city]
     except KeyError:
@@ -136,9 +136,10 @@ def expressavto(from_city: str, to_city: str, places: int, weight: int, volume: 
     }
     chrome_options.add_experimental_option("prefs", prefs)
 
-    driver = None
+    if driver is None:
+        raise TemporaryError("expressavto: driver is required")
+
     try:
-        driver = webdriver.Chrome(service=service, options=chrome_options)
         driver.set_page_load_timeout(25)
         wait = WebDriverWait(driver, 15, poll_frequency=0.2)
 
@@ -190,11 +191,7 @@ def expressavto(from_city: str, to_city: str, places: int, weight: int, volume: 
     except WebDriverException as e:
         raise TemporaryError(f"expressavto: webdriver error: {type(e).__name__}: {e}") from e
     finally:
-        if driver is not None:
-            try:
-                driver.quit()
-            except Exception:
-                pass
+        pass
 
 
 class ExpressAvtoAdapter(SyncSeleniumAdapter):
@@ -202,9 +199,9 @@ class ExpressAvtoAdapter(SyncSeleniumAdapter):
     TIMEOUT = 60.0
     HEADLESS = True
 
-    def _calc_sync(self, p: CalcParams) -> CalcResult:
+    def _calc_sync(self, p: CalcParams, driver: webdriver.Chrome) -> CalcResult:
         try:
-            price = expressavto(p.from_city, p.to_city, int(p.places), int(round(p.weight_kg)), float(p.volume_m3))
+            price = expressavto(p.from_city, p.to_city, int(p.places), int(round(p.weight_kg)), float(p.volume_m3), driver=driver)
         except ValueError as e:
             raise InvalidInputError(str(e)) from e
         except TemporaryError:

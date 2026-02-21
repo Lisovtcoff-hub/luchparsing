@@ -33,7 +33,8 @@ from selenium.common.exceptions import (
     NoSuchElementException,
 )
 
-from core.contracts import CarrierAdapter, CalcParams, CalcResult, TemporaryError, InvalidInputError
+from core.contracts import CalcParams, CalcResult, TemporaryError, InvalidInputError
+from core.selenium_base import SyncSeleniumAdapter, safe_click
 
 
 CDEK_URL = "https://www.cdek.ru/ru/cabinet/calculate/"
@@ -556,6 +557,7 @@ def sdek_calc_sync(
     places: int,
     weight_kg: float,
     dims: dict,
+    driver: webdriver.Chrome,
 ) -> tuple[Optional[float], Optional[str], Optional[int]]:
     """
     Возвращает:
@@ -563,28 +565,8 @@ def sdek_calc_sync(
       - name_tarif_json: JSON-строка с альтернативными тарифами (кроме "Стандарт") в виде {"Тариф": 1234.0, ...}
       - days: количество дней у тарифа с минимальной ценой (если найден), иначе None
     """
-    options = Options()
-
-    options.add_argument("--window-size=1366,768")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-extensions")
-    options.add_argument("--disable-infobars")
-    options.add_argument("--lang=ru-RU")
-
-    if os.getenv("CDEK_HEADLESS", "0") == "1":
-        options.add_argument("--headless=new")
-
-    chrome_bin = os.getenv("CHROME_BIN")
-    if chrome_bin:
-        options.binary_location = chrome_bin
-
-    driver = webdriver.Chrome(
-        service=Service(executable_path=os.getenv("CHROMEDRIVER", "/usr/bin/chromedriver")),
-        options=options,
-    )
-    driver.set_page_load_timeout(60)
+    if driver is None:
+        raise TemporaryError("cdek: driver is required")
 
     try:
         if places > 9:
@@ -869,25 +851,21 @@ def sdek_calc_sync(
         return None, None, None
 
     finally:
-        driver.quit()
+        pass
 
 
-class CdekAdapter(CarrierAdapter):
+class CdekAdapter(SyncSeleniumAdapter):
     """Класс CdekAdapter.
 
     Инкапсулирует связанную функциональность модуля.
     """
     code = "cdek"
 
-    async def calc(self, client: httpx.AsyncClient, p: CalcParams) -> CalcResult:
-        """Функция calc.
+    def _calc_sync(self, p: CalcParams, driver: webdriver.Chrome) -> CalcResult:
+        """??????? _calc_sync.
 
-        Параметры:
-            client: Описание параметра.
-            p: Описание параметра.
-
-        Возвращает:
-            Результат выполнения функции.
+        ?????????:
+            p: ???????? ?????????.
         """
         d = getattr(p, "dims", None)
         if d is None:
@@ -902,13 +880,13 @@ class CdekAdapter(CarrierAdapter):
         dims = {"l": float(l), "w": float(w), "h": float(h)}
 
         try:
-            price, name_tarif_json, days = await asyncio.to_thread(
-                sdek_calc_sync,
+            price, name_tarif_json, days = sdek_calc_sync(
                 p.from_city,
                 p.to_city,
                 int(p.places),
                 float(p.weight_kg),
                 dims,
+                driver,
             )
         except InvalidInputError:
             raise

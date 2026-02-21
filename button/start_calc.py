@@ -13,6 +13,7 @@ from typing import Dict, List
 from core.contracts import CalcParams, Dimensions, CarrierAdapter
 from core.logging_setup import kv
 from core.orchestrator import run_orchestrator
+from core.selenium_base import close_adapter_pools
 from database.db import Database
 from parsers.dellin import DellinAdapter
 from parsers.energiya import EnergiyaAdapter
@@ -165,3 +166,5 @@ async def run_job(job_id: int) -> None:
         logger.exception("job failed " + kv(job_id=job_id, err=f"{type(e).__name__}: {e}"))
         db.set_job_status(job_id, "failed", progress=0.0, errors_json=None)
         raise
+    finally:
+        await close_adapter_pools(adapters.values())

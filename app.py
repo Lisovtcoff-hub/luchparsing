@@ -38,6 +38,11 @@ def _init_schema():
     logger.info("app startup")
     db = Database()
     db.ensure_schema()
+    try:
+        if db.ensure_results_context():
+            logger.info("db migration applied: results.context_json")
+    except Exception:
+        logger.exception("db migration failed: results.context_json")
     app.state.db = db
 
 
@@ -47,6 +52,11 @@ def _db(request: Request) -> Database:
     if db is None:
         db = Database()
         db.ensure_schema()
+        try:
+            if db.ensure_results_context():
+                logger.info("db migration applied (late init): results.context_json")
+        except Exception:
+            logger.exception("db migration failed (late init): results.context_json")
         request.app.state.db = db
     return db
 
@@ -174,16 +184,16 @@ def routes_create(request: Request, item: dict = Body(...)):
         try:
             distance_km = int(distance_km)
         except (TypeError, ValueError):
-            raise HTTPException(400, "distance_km must be integer or null")
+            raise HTTPException(400, "дистанция должна быть целым числом или 0")
 
     if not from_city or not to_city:
-        raise HTTPException(400, "from_city/to_city required")
+        raise HTTPException(400, "направление не задано!")
 
     try:
         rid = _db(request).create_route(from_city, to_city, distance_km)
         return {"id": rid, "from_city": from_city, "to_city": to_city, "distance_km": distance_km}
     except Exception:
-        raise HTTPException(409, "route already exists")
+        raise HTTPException(409, "маршрут уже есть")
 
 
 @app.delete("/api/routes/{route_id}")
@@ -211,16 +221,16 @@ def routes_update(request: Request, route_id: int = FPath(..., ge=1), item: dict
         try:
             distance_km = int(distance_km)
         except (TypeError, ValueError):
-            raise HTTPException(400, "distance_km must be integer or null")
+            raise HTTPException(400, "дистанция должна быть целым числом или 0")
 
     if not from_city or not to_city:
-        raise HTTPException(400, "from_city/to_city required")
+        raise HTTPException(400, "направление не задано!")
 
     try:
         _db(request).update_route(route_id, from_city, to_city, distance_km)
         return {"ok": True, "id": route_id, "from_city": from_city, "to_city": to_city, "distance_km": distance_km}
     except Exception:
-        raise HTTPException(409, "route already exists")
+        raise HTTPException(409, "маршрут уже есть")
 
 
 
@@ -253,10 +263,10 @@ def presets_create(request: Request, item: dict = Body(...)):
         weight_kg = float(item.get("weight_kg") or 0.0)
         volume_m3 = float(item.get("volume_m3") or 0.0)
     except Exception:
-        raise HTTPException(400, "invalid numeric fields")
+        raise HTTPException(400, "неправильные поля с числами")
 
     if places < 1 or weight_kg < 0 or volume_m3 < 0:
-        raise HTTPException(400, "invalid numeric ranges")
+        raise HTTPException(400, "неправильные поля с числами")
 
     dims_cm_json = item.get("dims_cm_json")
     pid = _db(request).create_preset(places, weight_kg, volume_m3, dims_cm_json)
@@ -291,10 +301,10 @@ def presets_update(request: Request, preset_id: int = FPath(..., ge=1), item: di
         weight_kg = float(item.get("weight_kg") or 0.0)
         volume_m3 = float(item.get("volume_m3") or 0.0)
     except Exception:
-        raise HTTPException(400, "invalid numeric fields")
+        raise HTTPException(400, "неправильные поля с числами")
 
     if places < 1 or weight_kg < 0 or volume_m3 < 0:
-        raise HTTPException(400, "invalid numeric ranges")
+        raise HTTPException(400, "неправильные поля с числами")
 
     dims_cm_json = item.get("dims_cm_json")
     _db(request).update_preset(preset_id, places, weight_kg, volume_m3, dims_cm_json)
@@ -385,7 +395,7 @@ def export_db_button_get(request: Request, background: BackgroundTasks):
         src = Path(db.db_path)
 
     if not src.exists():
-        raise HTTPException(404, "database file not found")
+        raise HTTPException(404, "база данных не найдена")
 
     tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
     tmp_path = Path(tmp.name)
@@ -450,7 +460,7 @@ def api_job(request: Request, job_id: int):
     """
     job = _db(request).get_job(job_id)
     if not job:
-        raise HTTPException(404, "job not found")
+        raise HTTPException(404, "работа не найдена")
     return job
 
 
@@ -468,7 +478,7 @@ def api_job_cancel(request: Request, job_id: int):
     db = _db(request)
     job = db.get_job(job_id)
     if not job:
-        raise HTTPException(404, "job not found")
+        raise HTTPException(404, "работа не найдена")
     if job["status"] in ("done", "cancelled"):
         return {"ok": True, "status": job["status"]}
     db.request_job_cancel(job_id)

@@ -42,6 +42,7 @@ DELLIN_READ_TIMEOUT = float(os.getenv("DELLIN_READ_TIMEOUT", "30"))
 DELLIN_MAX_ATTEMPTS = int(os.getenv("DELLIN_MAX_ATTEMPTS", "5"))
 DELLIN_BACKOFF_BASE = float(os.getenv("DELLIN_BACKOFF_BASE", "0.4"))
 DELLIN_BACKOFF_MAX = float(os.getenv("DELLIN_BACKOFF_MAX", "6"))
+_BANNED = ["Благовещенск"]
 
 
 PRODUCE_DATE_MAX_SHIFT_DAYS = int(os.getenv('DELLIN_PRODUCE_DATE_MAX_SHIFT_DAYS', '7'))
@@ -333,7 +334,7 @@ def dellin_calc(
     Возвращает:
         Результат выполнения функции.
     """
-    if _is_no_city(from_city, to_city):
+    if _is_no_city(from_city, to_city) or (to_city in _BANNED or from_city in _BANNED):
         raise InvalidInputError(f"dellin: нет терминала для {from_city} - {to_city} (cached)")
 
     try:
