@@ -52,6 +52,9 @@ banned = []
 
 _NO_CITY_LOCK = threading.Lock()
 _NO_CITY_ROUTES: set[tuple[str, str]] = set()
+_ROUTE_WAIT_TIMEOUTS: dict[tuple[str, str], int] = {}
+_NO_CITY_UNTIL: dict[tuple[str, str], float] = {}
+FASTRANS_NO_ROUTE_TTL_S = float(os.getenv("FASTRANS_NO_ROUTE_TTL_S", "1800") or 1800)
 
 
 def _route_key(from_city: str, to_city: str) -> tuple[str, str]:
@@ -59,13 +62,39 @@ def _route_key(from_city: str, to_city: str) -> tuple[str, str]:
 
 
 def _remember_no_city(from_city: str, to_city: str) -> None:
+    key = _route_key(from_city, to_city)
+    now = time.time()
     with _NO_CITY_LOCK:
-        _NO_CITY_ROUTES.add(_route_key(from_city, to_city))
+        _NO_CITY_ROUTES.add(key)
+        if FASTRANS_NO_ROUTE_TTL_S > 0:
+            _NO_CITY_UNTIL[key] = now + FASTRANS_NO_ROUTE_TTL_S
+        elif key in _NO_CITY_UNTIL:
+            _NO_CITY_UNTIL.pop(key, None)
 
 
 def _is_no_city(from_city: str, to_city: str) -> bool:
+    key = _route_key(from_city, to_city)
+    now = time.time()
     with _NO_CITY_LOCK:
-        return _route_key(from_city, to_city) in _NO_CITY_ROUTES
+        if key not in _NO_CITY_ROUTES:
+            return False
+        until = _NO_CITY_UNTIL.get(key)
+        if until is None:
+            return True
+        if now >= until:
+            _NO_CITY_ROUTES.discard(key)
+            _NO_CITY_UNTIL.pop(key, None)
+            _ROUTE_WAIT_TIMEOUTS.pop(key, None)
+            return False
+        return True
+
+
+def _bump_wait_timeout(from_city: str, to_city: str) -> int:
+    key = _route_key(from_city, to_city)
+    with _NO_CITY_LOCK:
+        cnt = _ROUTE_WAIT_TIMEOUTS.get(key, 0) + 1
+        _ROUTE_WAIT_TIMEOUTS[key] = cnt
+        return cnt
 
 
 def _textcontent(el) -> str:
@@ -558,6 +587,12 @@ def fastrans(
                 raise InvalidInputError(f"fastrans: city not served: {err_text}")
             raise InvalidInputError(f"fastrans: invalid form: {err_text}")
         if node is None:
+            cnt = _bump_wait_timeout(from_city, to_city)
+            if cnt >= 2:
+                _remember_no_city(from_city, to_city)
+                raise InvalidInputError(
+                    f"fastrans: no terminal for route {from_city!r} -> {to_city!r} (selenium wait timeout x{cnt})"
+                )
             raise TemporaryError("fastrans: selenium wait timeout")
         breakdown = _extract_breakdown(node)
         log.debug("fastrans breakdown request_id=%s data=%s", request_id, breakdown)
@@ -584,6 +619,12 @@ def fastrans(
 
     except TimeoutException as e:
         log.exception("fastrans timeout request_id=%s: %s", request_id, e)
+        cnt = _bump_wait_timeout(from_city, to_city)
+        if cnt >= 2:
+            _remember_no_city(from_city, to_city)
+            raise InvalidInputError(
+                f"fastrans: no terminal for route {from_city!r} -> {to_city!r} (selenium wait timeout x{cnt})"
+            ) from e
         raise TemporaryError("fastrans: selenium wait timeout") from e
 
     except NoSuchElementException as e:

@@ -29,11 +29,22 @@ HEADERS = {
 TKKIT_SOURCE = "https://tk-kit.ru/"
 
 logger = logging.getLogger(__name__)
+TKKIT_BLOCK_PRIVILEGED_PICKUP = (os.getenv("TKKIT_BLOCK_PRIVILEGED_PICKUP", "1") or "1").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+}
+TKKIT_BLOCK_OUT_OF_CITY = (os.getenv("TKKIT_BLOCK_OUT_OF_CITY", "0") or "0").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+}
+TKKIT_BANNED_TTL_S = float(os.getenv("TKKIT_BANNED_TTL_S", "1800") or 1800)
 
 _CITY_CODE_CACHE: Dict[str, str] = {}
 _NO_CITY_LOCK = threading.Lock()
 _NO_CITY_ROUTES: set[tuple[str, str]] = set()
-_BANNED = []
+_BANNED_ROUTES: Dict[tuple[str, str], Optional[float]] = {}
 
 
 def _route_key(from_city: str, to_city: str) -> tuple[str, str]:
@@ -48,6 +59,31 @@ def _remember_no_city(from_city: str, to_city: str) -> None:
 def _is_no_city(from_city: str, to_city: str) -> bool:
     with _NO_CITY_LOCK:
         return _route_key(from_city, to_city) in _NO_CITY_ROUTES
+
+
+def _remember_banned_route(from_city: str, to_city: str) -> None:
+    key = _route_key(from_city, to_city)
+    now = time.time()
+    with _NO_CITY_LOCK:
+        if TKKIT_BANNED_TTL_S > 0:
+            _BANNED_ROUTES[key] = now + TKKIT_BANNED_TTL_S
+        else:
+            _BANNED_ROUTES[key] = None
+
+
+def _is_banned_route(from_city: str, to_city: str) -> bool:
+    key = _route_key(from_city, to_city)
+    now = time.time()
+    with _NO_CITY_LOCK:
+        until = _BANNED_ROUTES.get(key)
+        if until is None and key in _BANNED_ROUTES:
+            return True
+        if until is None:
+            return False
+        if now >= until:
+            _BANNED_ROUTES.pop(key, None)
+            return False
+        return True
 
 
 def get_city_code(name: str) -> str:
@@ -120,10 +156,9 @@ def tkkit(
     Р’РѕР·РІСЂР°С‰Р°РµС‚:
         Р РµР·СѓР»СЊС‚Р°С‚ РІС‹РїРѕР»РЅРµРЅРёСЏ С„СѓРЅРєС†РёРё.
     """
-    for i in _BANNED:
-        if from_city in i[0] and to_city in i[1]:
-            print(f"tkkit: no terminal for route {from_city!r} -> {to_city!r} (cached)")
-            return None, None, {}, None
+    if _is_banned_route(from_city, to_city):
+        logger.warning("tkkit disallowed route cached from=%s to=%s", from_city, to_city)
+        return None, None, {}, None
 
     if _is_no_city(from_city, to_city):
         raise InvalidInputError(f"tkkit: no terminal for route {from_city!r} -> {to_city!r} (cached)")
@@ -201,20 +236,29 @@ def tkkit(
     # 1) discounted pickup/delivery means route should not be priced
     # 2) out-of-city truck dispatch means route should not be priced
     has_disallowed_service = False
+    disallowed_reason = ""
     for item in details:
         if not isinstance(item, dict):
             continue
         name = str(item.get("name") or "").strip().lower()
         code = str(item.get("code") or "").strip().upper()
-        if "льгот" in name or code == "S112":
+        if TKKIT_BLOCK_PRIVILEGED_PICKUP and ("льгот" in name or code == "S112"):
             has_disallowed_service = True
+            disallowed_reason = f"{code}:{name}"
             break
-        if "черту города" in name or code in {"S001", "S010"}:
+        if TKKIT_BLOCK_OUT_OF_CITY and ("черту города" in name or code in {"S001", "S010"}):
             has_disallowed_service = True
+            disallowed_reason = f"{code}:{name}"
             break
 
     if has_disallowed_service:
-        _BANNED.append((from_city, to_city))
+        _remember_banned_route(from_city, to_city)
+        logger.warning(
+            "tkkit disallowed service route cached from=%s to=%s reason=%s",
+            from_city,
+            to_city,
+            disallowed_reason,
+        )
         return None, None, {}, None
     try:
         price_raw = json_data[0]["01"]["detail"][0]["price"]

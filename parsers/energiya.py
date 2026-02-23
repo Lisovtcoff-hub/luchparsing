@@ -12,6 +12,7 @@ import json
 import threading
 import random
 import time
+import logging
 from typing import Any, Dict, Optional, Tuple
 
 import httpx
@@ -106,6 +107,7 @@ HEADERS = {
 }
 
 ENERGIYA_SOURCE = "https://nrg-tk.ru/"
+logger = logging.getLogger(__name__)
 
 # --- Cities cache ---
 # В исходной версии find_city ходил в /v3/cities на каждый пресет, из-за чего
@@ -124,6 +126,11 @@ _CITIES_CACHE_PATH = os.getenv("ENERGIYA_CITIES_CACHE_PATH", "/app/exports/energ
 # route-level timeout ban for current run
 _NO_ROUTE_ROUTES: set[tuple[str, str]] = set()
 _ROUTE_TIMEOUTS: dict[tuple[str, str], int] = {}
+_NET_ERR_LOCK = threading.Lock()
+_NET_ERR_STREAK = 0
+_COOLDOWN_UNTIL_TS = 0.0
+ENERGIYA_COOLDOWN_AFTER_ERRORS = int(os.getenv("ENERGIYA_COOLDOWN_AFTER_ERRORS", "3") or 3)
+ENERGIYA_COOLDOWN_S = float(os.getenv("ENERGIYA_COOLDOWN_S", "90") or 90)
 
 
 def _route_key(from_city: str, to_city: str) -> tuple[str, str]:
@@ -143,6 +150,34 @@ def _bump_route_timeout(from_city: str, to_city: str) -> int:
     cnt = _ROUTE_TIMEOUTS.get(key, 0) + 1
     _ROUTE_TIMEOUTS[key] = cnt
     return cnt
+
+
+def _is_cooldown_active() -> bool:
+    now = time.time()
+    with _NET_ERR_LOCK:
+        return _COOLDOWN_UNTIL_TS > now
+
+
+def _activate_cooldown() -> None:
+    global _COOLDOWN_UNTIL_TS
+    with _NET_ERR_LOCK:
+        _COOLDOWN_UNTIL_TS = time.time() + max(0.0, ENERGIYA_COOLDOWN_S)
+
+
+def _mark_network_error() -> None:
+    global _NET_ERR_STREAK
+    with _NET_ERR_LOCK:
+        _NET_ERR_STREAK += 1
+        streak = _NET_ERR_STREAK
+    if streak >= max(1, ENERGIYA_COOLDOWN_AFTER_ERRORS):
+        _activate_cooldown()
+
+
+def _mark_network_success() -> None:
+    global _NET_ERR_STREAK, _COOLDOWN_UNTIL_TS
+    with _NET_ERR_LOCK:
+        _NET_ERR_STREAK = 0
+        _COOLDOWN_UNTIL_TS = 0.0
 
 
 def _load_cities_cache_from_disk() -> None:
@@ -282,11 +317,19 @@ def energiya(
     Возвращает:
         Результат выполнения функции.
     """
+    if _is_cooldown_active():
+        raise TemporaryError("energiya: cooldown active [no-retry]")
+
     if _is_no_route(from_city, to_city):
         raise InvalidInputError(f"energiya: no terminal for route (cached): {from_city} -> {to_city}")
 
-    id_city_from = find_city(from_city)
-    id_city_to = find_city(to_city)
+    try:
+        id_city_from = find_city(from_city)
+        id_city_to = find_city(to_city)
+    except (requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
+        _mark_network_error()
+        logger.warning("energiya city lookup network error from=%s to=%s err=%s", from_city, to_city, e)
+        raise TemporaryError(f"energiya: city lookup network error: {e} [no-retry]") from e
 
     if not id_city_from:
         raise InvalidInputError(f"energiya: не найден город отправления: {from_city}")
@@ -335,15 +378,9 @@ def energiya(
             break
         except (requests.exceptions.ConnectTimeout, requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
             last_exc = e
-            if isinstance(e, requests.exceptions.ConnectTimeout):
-                cnt = _bump_route_timeout(from_city, to_city)
-                if cnt >= 2:
-                    _remember_no_route(from_city, to_city)
-                    raise InvalidInputError(
-                        f"energiya: no terminal for route (connect timeout x{cnt}): {from_city} -> {to_city}"
-                    ) from e
+            _mark_network_error()
             if attempt >= max_attempts:
-                raise
+                raise TemporaryError(f"energiya: network error: {e} [no-retry]") from e
             # exponential backoff + jitter
             delay = min(max_delay, base_delay * (2 ** (attempt - 1)))
             jitter = random.uniform(0, delay * 0.35)
@@ -352,6 +389,7 @@ def energiya(
     else:
         # should never happen
         raise last_exc or RuntimeError("energiya: request failed")
+    _mark_network_success()
 
     transfer = (json_data.get("transfer") or [])
     if not transfer or not isinstance(transfer, list):
