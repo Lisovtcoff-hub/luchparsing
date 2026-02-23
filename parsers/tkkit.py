@@ -1,6 +1,6 @@
-"""Модуль tkkit.
+﻿"""РњРѕРґСѓР»СЊ tkkit.
 
-Содержит прикладную логику и точки входа проекта.
+РЎРѕРґРµСЂР¶РёС‚ РїСЂРёРєР»Р°РґРЅСѓСЋ Р»РѕРіРёРєСѓ Рё С‚РѕС‡РєРё РІС…РѕРґР° РїСЂРѕРµРєС‚Р°.
 """
 
 from __future__ import annotations
@@ -51,13 +51,13 @@ def _is_no_city(from_city: str, to_city: str) -> bool:
 
 
 def get_city_code(name: str) -> str:
-    """Функция get_city_code.
+    """Р¤СѓРЅРєС†РёСЏ get_city_code.
 
-    Параметры:
-        name: Описание параметра.
+    РџР°СЂР°РјРµС‚СЂС‹:
+        name: РћРїРёСЃР°РЅРёРµ РїР°СЂР°РјРµС‚СЂР°.
 
-    Возвращает:
-        Результат выполнения функции.
+    Р’РѕР·РІСЂР°С‰Р°РµС‚:
+        Р РµР·СѓР»СЊС‚Р°С‚ РІС‹РїРѕР»РЅРµРЅРёСЏ С„СѓРЅРєС†РёРё.
     """
     key = (name or "").strip().lower()
     if key in _CITY_CODE_CACHE:
@@ -81,8 +81,8 @@ def get_city_code(name: str) -> str:
             resp.raise_for_status()
             answer = resp.json()
             if not isinstance(answer, list) or not answer:
-                raise ValueError(f"tkkit: город не найден: {name!r}")
-            if name == 'Октябрьский':
+                raise ValueError(f"tkkit: РіРѕСЂРѕРґ РЅРµ РЅР°Р№РґРµРЅ: {name!r}")
+            if name == 'РћРєС‚СЏР±СЂСЊСЃРєРёР№':
                 code = "020000400000"
             else:
                 code = answer[0]["code"]
@@ -95,7 +95,7 @@ def get_city_code(name: str) -> str:
 
     if last_exc:
         raise last_exc
-    raise ValueError(f"tkkit: город не найден: {name!r}")
+    raise ValueError(f"tkkit: РіРѕСЂРѕРґ РЅРµ РЅР°Р№РґРµРЅ: {name!r}")
 
 
 
@@ -107,18 +107,18 @@ def tkkit(
     volume_m3: float,
     dims_cm_json: Dict[str, float],
 ) -> tuple[Optional[float], Optional[str], Dict[str, Any], Optional[str]]:
-    """Функция tkkit.
+    """Р¤СѓРЅРєС†РёСЏ tkkit.
 
-    Параметры:
-        from_city: Описание параметра.
-        to_city: Описание параметра.
-        places: Описание параметра.
-        weight_kg: Описание параметра.
-        volume_m3: Описание параметра.
-        dims_cm_json: Описание параметра.
+    РџР°СЂР°РјРµС‚СЂС‹:
+        from_city: РћРїРёСЃР°РЅРёРµ РїР°СЂР°РјРµС‚СЂР°.
+        to_city: РћРїРёСЃР°РЅРёРµ РїР°СЂР°РјРµС‚СЂР°.
+        places: РћРїРёСЃР°РЅРёРµ РїР°СЂР°РјРµС‚СЂР°.
+        weight_kg: РћРїРёСЃР°РЅРёРµ РїР°СЂР°РјРµС‚СЂР°.
+        volume_m3: РћРїРёСЃР°РЅРёРµ РїР°СЂР°РјРµС‚СЂР°.
+        dims_cm_json: РћРїРёСЃР°РЅРёРµ РїР°СЂР°РјРµС‚СЂР°.
 
-    Возвращает:
-        Результат выполнения функции.
+    Р’РѕР·РІСЂР°С‰Р°РµС‚:
+        Р РµР·СѓР»СЊС‚Р°С‚ РІС‹РїРѕР»РЅРµРЅРёСЏ С„СѓРЅРєС†РёРё.
     """
     for i in _BANNED:
         if from_city in i[0] and to_city in i[1]:
@@ -191,21 +191,31 @@ def tkkit(
     price_raw = None
     days_raw = None
     insurance_raw = None
-
+    details = []
     try:
-        t = json_data[0]["01"]["detail"][3]
+        details = json_data[0]["01"].get("detail") or []
+    except Exception:
+        details = []
+
+    # Business rules:
+    # 1) discounted pickup/delivery means route should not be priced
+    # 2) out-of-city truck dispatch means route should not be priced
+    has_disallowed_service = False
+    for item in details:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip().lower()
+        code = str(item.get("code") or "").strip().upper()
+        if "льгот" in name or code == "S112":
+            has_disallowed_service = True
+            break
+        if "черту города" in name or code in {"S001", "S010"}:
+            has_disallowed_service = True
+            break
+
+    if has_disallowed_service:
         _BANNED.append((from_city, to_city))
         return None, None, {}, None
-    except Exception:
-        pass
-    
-    try:
-        if json_data[0]["01"]["detail"][2]['name'] == "Льготная доставка":
-            _BANNED.append((from_city, to_city))
-            return None, None, {}, None
-    except Exception:
-        pass
-
     try:
         price_raw = json_data[0]["01"]["detail"][0]["price"]
     except Exception:
@@ -240,8 +250,8 @@ def tkkit(
 
     allowances: Dict[str, Any] = {}
     if insurance_raw is not None:
-        # allowances["Страхование"] = insurance_raw
-        allowances["Страхование"] = "Временно недоступно"
+        # allowances["РЎС‚СЂР°С…РѕРІР°РЅРёРµ"] = insurance_raw
+        allowances["РЎС‚СЂР°С…РѕРІР°РЅРёРµ"] = "Р’СЂРµРјРµРЅРЅРѕ РЅРµРґРѕСЃС‚СѓРїРЅРѕ"
 
 
     name_tarif_json: Optional[str] = None
@@ -250,24 +260,24 @@ def tkkit(
 
 
 class TkkitAdapter(CarrierAdapter):
-    """Класс TkkitAdapter.
+    """РљР»Р°СЃСЃ TkkitAdapter.
 
-    Инкапсулирует связанную функциональность модуля.
+    РРЅРєР°РїСЃСѓР»РёСЂСѓРµС‚ СЃРІСЏР·Р°РЅРЅСѓСЋ С„СѓРЅРєС†РёРѕРЅР°Р»СЊРЅРѕСЃС‚СЊ РјРѕРґСѓР»СЏ.
     """
     code = "tkkit"
 
     async def calc(self, client: httpx.AsyncClient, p: CalcParams) -> CalcResult:
-        """Функция calc.
+        """Р¤СѓРЅРєС†РёСЏ calc.
 
-        Параметры:
-            client: Описание параметра.
-            p: Описание параметра.
+        РџР°СЂР°РјРµС‚СЂС‹:
+            client: РћРїРёСЃР°РЅРёРµ РїР°СЂР°РјРµС‚СЂР°.
+            p: РћРїРёСЃР°РЅРёРµ РїР°СЂР°РјРµС‚СЂР°.
 
-        Возвращает:
-            Результат выполнения функции.
+        Р’РѕР·РІСЂР°С‰Р°РµС‚:
+            Р РµР·СѓР»СЊС‚Р°С‚ РІС‹РїРѕР»РЅРµРЅРёСЏ С„СѓРЅРєС†РёРё.
         """
         if not TOKEN:
-            raise TemporaryError("tkkit: не задана переменная окружения TKKIT_TOKEN")
+            raise TemporaryError("tkkit: РЅРµ Р·Р°РґР°РЅР° РїРµСЂРµРјРµРЅРЅР°СЏ РѕРєСЂСѓР¶РµРЅРёСЏ TKKIT_TOKEN")
         try:
             dims_cm = {
                 "l": float(p.dims.length_cm),
@@ -300,3 +310,4 @@ class TkkitAdapter(CarrierAdapter):
 
 
 __all__ = ["tkkit", "get_city_code", "TkkitAdapter"]
+
