@@ -33,6 +33,8 @@ _NO_ROUTE_LOCK = threading.Lock()
 _NO_ROUTE_ROUTES: set[tuple[str, str]] = set()
 _NO_RESULT_LOCK = threading.Lock()
 _NO_RESULT_ROUTES: set[tuple[str, str]] = set()
+_STALE_ROUTE_LOCK = threading.Lock()
+_STALE_ROUTE_COUNTS: dict[tuple[str, str], int] = {}
 MAGIC_TRANS_STALE_RETRIES = int(os.getenv("MAGIC_TRANS_STALE_RETRIES", "3") or 3)
 MAGIC_TRANS_MAX_BROWSERS = int(os.getenv("MAGIC_TRANS_MAX_BROWSERS", "1") or 1)
 MAGIC_TRANS_DRIVER_RETRIES = int(os.getenv("MAGIC_TRANS_DRIVER_RETRIES", "2") or 2)
@@ -77,6 +79,20 @@ def _remember_no_result(from_city: str, to_city: str) -> None:
 def _is_no_result(from_city: str, to_city: str) -> bool:
     with _NO_RESULT_LOCK:
         return _route_key(from_city, to_city) in _NO_RESULT_ROUTES
+
+
+def _bump_stale_route(from_city: str, to_city: str) -> int:
+    key = _route_key(from_city, to_city)
+    with _STALE_ROUTE_LOCK:
+        cnt = _STALE_ROUTE_COUNTS.get(key, 0) + 1
+        _STALE_ROUTE_COUNTS[key] = cnt
+        return cnt
+
+
+def _reset_stale_route(from_city: str, to_city: str) -> None:
+    key = _route_key(from_city, to_city)
+    with _STALE_ROUTE_LOCK:
+        _STALE_ROUTE_COUNTS.pop(key, None)
 
 
 def set_city(driver, wait, selector: str, text: str) -> None:
@@ -766,11 +782,20 @@ class MagicTransAdapter(SyncSeleniumAdapter):
                 show_browser=False,
                 driver=driver,
             )
+            _reset_stale_route(p.from_city, p.to_city)
         except InvalidInputError:
             raise
         except ValueError as e:
             raise InvalidInputError(str(e)) from e
-        except TemporaryError:
+        except TemporaryError as e:
+            msg = str(e)
+            if "magic-trans: stale element reference" in msg:
+                cnt = _bump_stale_route(p.from_city, p.to_city)
+                if cnt >= 2:
+                    _remember_no_route(p.from_city, p.to_city)
+                    raise InvalidInputError(
+                        f"magic-trans: no terminal for route (stale x{cnt}): {p.from_city} -> {p.to_city}"
+                    ) from e
             raise
         except Exception as e:
             raise TemporaryError(f"magic-trans: unexpected {type(e).__name__}: {e}") from e

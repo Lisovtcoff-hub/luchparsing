@@ -107,24 +107,20 @@ def _build_plan(db: Database):
             total_items += len(routes) * len(presets)
 
     def _iter_items():
-        for s in sites:
-            site_id = s["id"]
-            if site_id not in adapters:
-                continue
-
-            for r in routes:
-                for p in presets:
-                    preset_id = int(p["id"])
-                    dims = dims_by_preset[preset_id]
-
-                    params = CalcParams(
-                        from_city=r["from_city"],
-                        to_city=r["to_city"],
-                        places=int(p["places"]),
-                        weight_kg=float(p["weight_kg"]),
-                        volume_m3=float(p["volume_m3"]),
-                        dims=dims,
-                    )
+        active_site_ids = [s["id"] for s in sites if s["id"] in adapters]
+        for r in routes:
+            for p in presets:
+                preset_id = int(p["id"])
+                dims = dims_by_preset[preset_id]
+                params = CalcParams(
+                    from_city=r["from_city"],
+                    to_city=r["to_city"],
+                    places=int(p["places"]),
+                    weight_kg=float(p["weight_kg"]),
+                    volume_m3=float(p["volume_m3"]),
+                    dims=dims,
+                )
+                for site_id in active_site_ids:
                     yield (site_id, r["id"], p["id"], params)
 
     cfg = {row["id_site"]: row for row in db.get_sites_config()}

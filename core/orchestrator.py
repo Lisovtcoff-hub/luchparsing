@@ -44,6 +44,7 @@ CODE_PARALLEL_CAPS = {
     'energiya': int(os.getenv('CAP_PARALLEL_ENERGIYA', '2') or 2),
     'dellin': int(os.getenv('CAP_PARALLEL_DELLIN', '2') or 2),
     'jde': int(os.getenv('CAP_PARALLEL_JDE', '2') or 2),
+    'dpd': int(os.getenv('CAP_PARALLEL_DPD', '1') or 1),
 }
 DEFAULT_SITE_TIMEOUT = 30.0
 

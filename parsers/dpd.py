@@ -11,6 +11,7 @@ import re
 import time
 import uuid
 import logging
+import threading
 from pathlib import Path
 from contextlib import suppress
 
@@ -111,6 +112,8 @@ banned = ["Октябрьский", ]
 # route-level caches for current run
 _NO_ROUTE_ROUTES: set[tuple[str, str]] = set()
 _TIMEOUT_ROUTE_COUNTS: dict[tuple[str, str], int] = {}
+_ROUTE_STATE_LOCK = threading.Lock()
+_ROUTE_STATE: dict[tuple[str, str], dict[str, int]] = {}
 
 
 def _route_key(from_city: str, to_city: str) -> tuple[str, str]:
@@ -130,6 +133,27 @@ def _bump_timeout(from_city: str, to_city: str) -> int:
     cnt = _TIMEOUT_ROUTE_COUNTS.get(key, 0) + 1
     _TIMEOUT_ROUTE_COUNTS[key] = cnt
     return cnt
+
+
+def _record_success(from_city: str, to_city: str) -> None:
+    key = _route_key(from_city, to_city)
+    with _ROUTE_STATE_LOCK:
+        st = _ROUTE_STATE.setdefault(key, {"attempts": 0, "ok": 0, "timeouts": 0})
+        st["attempts"] += 1
+        st["ok"] += 1
+
+
+def _record_timeout(from_city: str, to_city: str) -> tuple[bool, int, int, int]:
+    key = _route_key(from_city, to_city)
+    with _ROUTE_STATE_LOCK:
+        st = _ROUTE_STATE.setdefault(key, {"attempts": 0, "ok": 0, "timeouts": 0})
+        st["attempts"] += 1
+        st["timeouts"] += 1
+        attempts = int(st["attempts"])
+        ok_count = int(st["ok"])
+        timeout_count = int(st["timeouts"])
+        early_ban = (ok_count == 0 and attempts >= 2)
+        return early_ban, timeout_count, ok_count, attempts
 
 log = logging.getLogger("parsers.dpd")
 
@@ -413,16 +437,22 @@ class DpdAdapter(SyncSeleniumAdapter):
                 round(float(p.volume_m3), 3),
                 driver=driver,
             )
+            _record_success(p.from_city, p.to_city)
         except ValueError as e:
             raise InvalidInputError(str(e)) from e
         except TemporaryError as e:
             msg = str(e)
             if "dpd: timeout while waiting for page elements/result" in msg:
                 cnt = _bump_timeout(p.from_city, p.to_city)
-                if cnt >= 2:
+                early_ban, timeout_count, ok_count, attempts = _record_timeout(p.from_city, p.to_city)
+                if early_ban:
                     _remember_no_route(p.from_city, p.to_city)
                     raise InvalidInputError(
-                        f"dpd: no terminal for route (timeout x{cnt}): {p.from_city} -> {p.to_city}"
+                        f"dpd: no terminal for route (first attempts timeout x{cnt}): {p.from_city} -> {p.to_city}"
+                    ) from e
+                if ok_count > 0:
+                    raise TemporaryError(
+                        f"dpd: timeout after partial success (timeouts={timeout_count}, attempts={attempts}) [tail-retry]"
                     ) from e
             raise
         except Exception as e:
