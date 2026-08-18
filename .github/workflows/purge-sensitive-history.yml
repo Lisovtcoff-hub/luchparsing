@@ -1,0 +1,42 @@
+name: Purge sensitive history
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/purge-sensitive-history.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  purge:
+    if: github.event_name == 'workflow_dispatch' || github.event.head_commit.message == 'security: run one-time history purge'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out complete history
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install git-filter-repo
+        run: python -m pip install --disable-pip-version-check git-filter-repo
+
+      - name: Remove environment file from every commit
+        run: git filter-repo --path .env --invert-paths --force
+
+      - name: Force-push sanitized history
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit --allow-empty -m "security: complete history purge"
+          git remote add origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force origin HEAD:main
+          git push --force --tags origin
