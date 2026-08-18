@@ -1,3 +1,4 @@
+# One-time maintenance workflow. Delete after successful completion.
 name: Purge sensitive history
 
 on:
