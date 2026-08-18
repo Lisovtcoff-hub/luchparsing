@@ -8,7 +8,7 @@ A FastAPI service that collects and compares freight delivery prices from multip
 
 > This public repository is a portfolio version. Production credentials and customer data are not included.
 
-## What the service does
+## What the project does
 
 - calculates delivery prices for multiple routes and cargo presets;
 - runs carrier adapters concurrently with per-adapter limits and timeouts;
@@ -50,108 +50,67 @@ Each carrier implements a common adapter contract and returns a normalized `Calc
 - Docker and Docker Compose
 - pytest and GitHub Actions
 
-## Quick start with Docker
-
-1. Clone the repository:
+## Quick start
 
 ```bash
 git clone https://github.com/Lisovtcoff-hub/luchparsing.git
 cd luchparsing
-```
-
-2. Create a local environment file:
-
-```bash
 cp .env.example .env
+docker compose up --build -d
 ```
 
 PowerShell:
 
 ```powershell
 Copy-Item .env.example .env
-```
-
-3. Replace placeholder credentials in `.env` with your own API keys and set a strong panel password.
-
-4. Start the application:
-
-```bash
 docker compose up --build -d
 ```
 
-5. Check the health endpoint:
+Set a strong panel password and add only carrier credentials you are authorized to use. The dashboard is available at `http://localhost:8000`; health check: `http://localhost:8000/health`.
 
-```bash
-curl http://localhost:8000/health
-```
-
-The dashboard is available at `http://localhost:8000`.
-
-## Local development
+## Development and tests
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+pip install -r requirements-dev.txt
+pytest -q
 uvicorn app:app --reload --port 8000
 ```
 
-On Windows, activate the environment with:
+On Windows, activate the environment with `.venv\Scripts\Activate.ps1`.
 
-```powershell
-.venv\Scripts\Activate.ps1
-```
-
-## Configuration
-
-The application reads configuration from environment variables. See `.env.example` for the complete template. Important variables include:
-
-- `PANEL_USER`, `PANEL_PASSWORD` — dashboard credentials;
-- `DELLIN_APPKEY` — Dellin API key;
-- `ENERGIYA_DEV_TOKEN` — Energiya API token;
-- `TKKIT_TOKEN` — TK KIT API token;
-- `VOZOVOZ_TOKEN` — Vozovoz API token;
-- `ORCH_WORKERS`, `ORCH_GLOBAL_LIMIT` — concurrency limits;
-- adapter-specific retry, timeout, cache, and browser settings.
-
-Never commit `.env`, API keys, exported databases, logs, or customer data.
-
-## Tests
-
-```bash
-pip install -r requirements-dev.txt
-pytest -q
-```
-
-GitHub Actions checks Python syntax and runs tests on Python 3.11 and 3.12 for every push and pull request.
+GitHub Actions checks Python syntax and runs tests on Python 3.11 and 3.12.
 
 ## Project structure
 
 ```text
-luchparsing/
-├── app.py                    # FastAPI routes and web application
-├── core/
-│   ├── contracts.py          # Shared adapter contracts
-│   ├── orchestrator.py       # Concurrent calculation orchestration
-│   ├── selenium_base.py      # Shared Selenium behavior
-│   └── driver_pool.py        # Browser driver lifecycle
-├── parsers/                  # Carrier integrations
-├── database/db.py            # SQLite access and migrations
-├── button/
-│   ├── start_calc.py         # Job startup
-│   └── export_xlsx.py        # XLSX export
-├── web/                      # Dashboard frontend
-├── tests/                    # Automated tests
-├── Dockerfile
-└── docker-compose.yml
+app.py                    FastAPI routes and web application
+core/                     contracts, orchestration, Selenium infrastructure
+parsers/                  carrier integrations
+database/db.py            SQLite access and migrations
+button/                   job startup and XLSX export
+web/                      dashboard frontend
+tests/                    automated tests
+Dockerfile                application image
+docker-compose.yml        local deployment
 ```
 
-## Operational notes
+## Security and operational notes
 
-Carrier websites and undocumented endpoints can change without notice. Selenium adapters therefore require monitoring and periodic selector updates. API-backed adapters require valid credentials from the corresponding carrier. The repository does not include a production database or real credentials.
+- Configuration is loaded from environment variables documented in `.env.example`.
+- Real API credentials, databases, logs, and customer data must not be committed.
+- Carrier websites and undocumented endpoints can change without notice.
+- Selenium adapters require periodic selector maintenance and browser compatibility checks.
+- API-backed adapters require valid credentials from the corresponding carriers.
+
+## Project status
+
+This is a portfolio-safe version of a commercial logistics automation project. Company-specific operational data and credentials have been removed while preserving the core architecture and adapter model.
 
 ## Author
 
-Sergey Inozemtsev — Python Backend Developer
+Sergey Inozemtsev — Python backend developer
 
 GitHub: https://github.com/Lisovtcoff-hub
