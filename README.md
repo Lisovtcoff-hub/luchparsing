@@ -1,6 +1,6 @@
 # LuchParsing
 
-[![CI](https://github.com/Lisovtcoff-hub/luchparsing/actions/workflows/ci.yml/badge.svg)](https://github.com/Lisovtcoff-hub/luchparsing/actions/workflows/ci.yml)
+[![CI](https://github.com/lisovcoff/luchparsing/actions/workflows/ci.yml/badge.svg)](https://github.com/lisovcoff/luchparsing/actions/workflows/ci.yml)
 
 A FastAPI service that collects and compares freight delivery prices from multiple Russian transport companies. The application combines direct API integrations and Selenium-based adapters behind one interface, runs calculations concurrently, stores calculation history, and exports results to Excel.
 
@@ -53,7 +53,7 @@ Each carrier implements a common adapter contract and returns a normalized `Calc
 ## Quick start
 
 ```bash
-git clone https://github.com/Lisovtcoff-hub/luchparsing.git
+git clone https://github.com/lisovcoff/luchparsing.git
 cd luchparsing
 cp .env.example .env
 docker compose up --build -d
@@ -113,4 +113,4 @@ This is a portfolio-safe version of a commercial logistics automation project. C
 
 Sergey Inozemtsev — Python backend developer
 
-GitHub: https://github.com/Lisovtcoff-hub
+GitHub: https://github.com/lisovcoff
