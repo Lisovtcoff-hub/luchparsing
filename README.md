@@ -2,20 +2,20 @@
 
 [![CI](https://github.com/lisovcoff/luchparsing/actions/workflows/ci.yml/badge.svg)](https://github.com/lisovcoff/luchparsing/actions/workflows/ci.yml)
 
-A FastAPI service that collects and compares freight delivery prices from multiple Russian transport companies. The application combines direct API integrations and Selenium-based adapters behind one interface, runs calculations concurrently, stores calculation history, and exports results to Excel.
+Freight rate aggregation service built with FastAPI. The application runs carrier adapters concurrently, normalizes responses from different providers, stores calculation history, and exports comparison reports to XLSX.
 
-> This public repository is a portfolio version. Production credentials and customer data are not included.
+## Highlights
 
-## What the project does
+- unified adapter contract for HTTP and Selenium-based carriers;
+- concurrent job orchestration with per-adapter limits, retries, timeouts, and progress tracking;
+- route and cargo preset management;
+- calculation history with comparison against the previous successful run;
+- web dashboard protected with HTTP Basic Authentication;
+- REST API, health checks, and Docker-based local deployment.
 
-- calculates delivery prices for multiple routes and cargo presets;
-- runs carrier adapters concurrently with per-adapter limits and timeouts;
-- supports both HTTP API and browser-automation integrations;
-- stores jobs, results, errors, routes, and presets in SQLite;
-- compares each run with the previous successful calculation;
-- exports calculation results and price changes to XLSX;
-- exposes a web dashboard protected with HTTP Basic Authentication;
-- provides health checks and Docker-based deployment.
+## Stack
+
+`Python 3.11` · `FastAPI` · `SQLite` · `Selenium` · `httpx` · `openpyxl` · `Docker Compose` · `pytest` · `GitHub Actions`
 
 ## Architecture
 
@@ -35,20 +35,9 @@ HTTP API adapters   Selenium adapters
           XLSX export
 ```
 
-Each carrier implements a common adapter contract and returns a normalized `CalcResult`. The orchestrator handles concurrency, retries, timeouts, temporary failures, progress tracking, and circuit-breaker-like behavior.
+Each carrier implements the same adapter contract and returns a normalized `CalcResult`. The orchestration layer handles concurrency, temporary failures, timeouts, and job progress.
 
-## Technology stack
-
-- Python 3.11+
-- FastAPI and Uvicorn
-- asyncio, httpx, requests
-- Selenium and Chromium
-- SQLite
-- openpyxl
-- Docker and Docker Compose
-- pytest and GitHub Actions
-
-## Quick start
+## Run locally
 
 ```bash
 git clone https://github.com/lisovcoff/luchparsing.git
@@ -64,7 +53,7 @@ Copy-Item .env.example .env
 docker compose up --build -d
 ```
 
-Set a strong panel password and add only carrier credentials you are authorized to use. The dashboard is available at `http://localhost:8000`; health check: `http://localhost:8000/health`.
+The dashboard is available at `http://localhost:8000`, and the health check is available at `http://localhost:8000/health`.
 
 ## Development and tests
 
@@ -79,9 +68,7 @@ uvicorn app:app --reload --port 8000
 
 On Windows, activate the environment with `.venv\Scripts\Activate.ps1`.
 
-GitHub Actions checks Python syntax and runs tests on Python 3.11 and 3.12.
-
-## Project structure
+## Repository layout
 
 ```text
 app.py                    FastAPI routes and web application
@@ -95,20 +82,8 @@ Dockerfile                application image
 docker-compose.yml        local deployment
 ```
 
-## Security and operational notes
+## Notes
 
-- Configuration is loaded from environment variables documented in `.env.example`.
-- Real API credentials, databases, logs, and customer data must not be committed.
-- Carrier websites and undocumented endpoints can change without notice.
-- Selenium adapters require periodic selector maintenance and browser compatibility checks.
-- API-backed adapters require valid credentials from the corresponding carriers.
-
-## Project status
-
-This is a portfolio-safe version of a commercial logistics automation project. Company-specific operational data and credentials have been removed while preserving the core architecture and adapter model.
-
-## Author
-
-Sergey Inozemtsev — Python backend developer
-
-GitHub: https://github.com/lisovcoff
+- Configuration is documented in `.env.example`.
+- This public repository excludes carrier credentials and operational datasets.
+- Selenium-based adapters depend on third-party markup and require periodic maintenance.
