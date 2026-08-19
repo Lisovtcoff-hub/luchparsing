@@ -4,8 +4,6 @@
 
 A FastAPI service that collects and compares freight delivery prices from multiple Russian transport companies. The application combines direct API integrations and Selenium-based adapters behind one interface, runs calculations concurrently, stores calculation history, and exports results to Excel.
 
-**Live demo:** https://pilot.lisovcoff.ru/
-
 > This public repository is a portfolio version. Production credentials and customer data are not included.
 
 ## What the project does
